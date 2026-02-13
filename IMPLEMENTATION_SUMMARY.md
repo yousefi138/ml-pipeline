@@ -138,7 +138,7 @@ Step 3: Evaluation & Reporting
 
 ### Option 1: Run Complete Pipeline (All-in-One)
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 **Output**:
@@ -236,7 +236,7 @@ python evaluation.py
 ## File Locations
 
 ```
-/Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline/
+working/scripts/ml-pipeline/
 ├── config.py                      ← Configuration
 ├── utils.py                       ← Utility functions
 ├── data_prep.py                   ← Data loading/prep
@@ -249,7 +249,7 @@ python evaluation.py
 └── breast-cancer-data.py          ← Original data loader
 
 Results output to:
-/Users/py16069/repos/ml-pipeline/working/results/
+working/results/
 ├── logs/                          ← Timestamped log files
 ├── models/                        ← Saved model objects (.pkl)
 └── reports/                       ← JSON, CSV, PNG reports
@@ -261,7 +261,7 @@ Results output to:
 
 ### To Run the Pipeline
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py  # 5-10 minute runtime
 ```
 

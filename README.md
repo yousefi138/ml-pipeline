@@ -213,7 +213,7 @@ python ml_pipeline.py
 
 ### 1. Run Complete Pipeline
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 **Time**: 5-10 minutes  
@@ -352,7 +352,7 @@ results/
 **Issue**: Config file not found
 ```bash
 # Solution: Run from correct directory
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 

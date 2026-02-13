@@ -49,7 +49,7 @@ scripts/ml-pipeline/
 
 ### Run Everything
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 
@@ -392,7 +392,7 @@ See [QUICK_REFERENCE.md](QUICK_REFERENCE.md) "Common Issues & Fixes" section
 ## 📋 File Locations
 
 ```
-/Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline/
+working/scripts/ml-pipeline/
 
 Python Modules:
 ├── config.py                    ← Settings

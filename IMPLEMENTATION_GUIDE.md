@@ -11,7 +11,7 @@ This implementation provides a complete, production-ready supervised machine lea
 ### 1. Run the Complete Pipeline
 
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 
@@ -476,7 +476,7 @@ X[continuous_cols] = scaler.fit_transform(X[continuous_cols])
 ### Issue: "Config file not found"
 **Solution**: Ensure script is run from `scripts/ml-pipeline/` directory:
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 

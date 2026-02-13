@@ -3,7 +3,7 @@
 ## Quick Start (One Command)
 
 ```bash
-cd /Users/py16069/repos/ml-pipeline/working/scripts/ml-pipeline
+cd working/scripts/ml-pipeline
 python ml_pipeline.py
 ```
 
