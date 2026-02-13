@@ -1,0 +1,4 @@
+default:
+  project: "/Users/py16069/repos/ml-pipeline/working"
+local:
+  project: "/Users/py16069/repos/ml-pipeline/working"
