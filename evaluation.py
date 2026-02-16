@@ -87,29 +87,37 @@ class ModelEvaluator:
         
         params_report = {}
         
-        # Elastic Net parameters
+        # Elastic Net parameters (unwrap from Pipeline if necessary)
         en_model = self.en_results['final_model']
+        if hasattr(en_model, 'named_steps') and 'clf' in en_model.named_steps:
+            en_base = en_model.named_steps['clf']
+        else:
+            en_base = en_model
         en_params = {
             'model_type': 'LogisticRegression (Elastic Net)',
             'hyperparameters': self.en_results['best_params'],
             'cv_mean_auc': float(self.en_results['mean_score']),
             'cv_std_auc': float(self.en_results['std_score']),
-            'coefficients': en_model.coef_[0].tolist() if hasattr(en_model, 'coef_') else None,
-            'intercept': float(en_model.intercept_[0]) if hasattr(en_model, 'intercept_') else None,
-            'classes': en_model.classes_.tolist() if hasattr(en_model, 'classes_') else None
+            'coefficients': en_base.coef_[0].tolist() if hasattr(en_base, 'coef_') else None,
+            'intercept': float(en_base.intercept_[0]) if hasattr(en_base, 'intercept_') else None,
+            'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None
         }
         params_report['elastic_net'] = en_params
         
-        # Random Forest parameters
+        # Random Forest parameters (unwrap from Pipeline if necessary)
         rf_model = self.rf_results['final_model']
+        if hasattr(rf_model, 'named_steps') and 'clf' in rf_model.named_steps:
+            rf_base = rf_model.named_steps['clf']
+        else:
+            rf_base = rf_model
         rf_params = {
             'model_type': 'RandomForestClassifier',
             'hyperparameters': self.rf_results['best_params'],
             'cv_mean_auc': float(self.rf_results['mean_score']),
             'cv_std_auc': float(self.rf_results['std_score']),
-            'n_trees': rf_model.n_estimators,
-            'feature_importances': rf_model.feature_importances_.tolist() if hasattr(rf_model, 'feature_importances_') else None,
-            'classes': rf_model.classes_.tolist() if hasattr(rf_model, 'classes_') else None
+            'n_trees': rf_base.n_estimators,
+            'feature_importances': rf_base.feature_importances_.tolist() if hasattr(rf_base, 'feature_importances_') else None,
+            'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None
         }
         params_report['random_forest'] = rf_params
         

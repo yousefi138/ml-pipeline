@@ -127,10 +127,18 @@ def validate_data(df, target_column=TARGET_COLUMN):
     return validation_report
 
 
-def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True):
-    """
-    Preprocess features: separate clinical and gene expression, encode categorical variables.
-    
+def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True, encode_categorical=True):
+    """Preprocess features by separating target and features and optionally
+    encoding categorical variables and scaling continuous features.
+
+    This function is used in two modes:
+      - For the main pipeline training, we disable both encoding and scaling
+        (encode_categorical=False, scale_features=False) so that all
+        preprocessing is handled inside scikit-learn Pipelines within the
+        cross-validation loops (to avoid data leakage).
+      - For ad-hoc exploration, the defaults preserve the previous behaviour
+        of encoding categorical variables and scaling all features.
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -139,7 +147,9 @@ def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True):
         Name of the target column
     scale_features : bool
         Whether to scale continuous features (default True)
-    
+    encode_categorical : bool
+        Whether to label-encode categorical variables (default True)
+
     Returns
     -------
     X : pd.DataFrame
@@ -148,10 +158,11 @@ def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True):
         Target variable
     feature_groups : dict
         Dictionary describing feature groups
-    encoders : dict
-        Dictionary of fitted encoders for categorical variables
+    encoders : dict or None
+        Dictionary of fitted encoders for categorical variables if
+        encode_categorical=True, else None
     scaler : StandardScaler or None
-        Fitted scaler if scale_features=True
+        Fitted scaler if scale_features=True, else None
     """
     logger.info("=" * 60)
     logger.info("FEATURE PREPROCESSING")
@@ -168,21 +179,23 @@ def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True):
     logger.info(f"Clinical features: {len(feature_groups['clinical'])}")
     logger.info(f"Gene expression features: {len(feature_groups['gene_expression'])}")
     
-    # Identify and encode categorical variables
-    encoders = {}
+    encoders = None
+    # Identify and optionally encode categorical variables
     categorical_cols = X.select_dtypes(include=['object']).columns.tolist()
     logger.info(f"Categorical columns identified: {categorical_cols}")
-    
-    for col in categorical_cols:
-        le = LabelEncoder()
-        X[col] = le.fit_transform(X[col].astype(str))
-        encoders[col] = le
-        logger.info(f"Encoded {col}: {le.classes_}")
+
+    if encode_categorical and categorical_cols:
+        encoders = {}
+        for col in categorical_cols:
+            le = LabelEncoder()
+            X[col] = le.fit_transform(X[col].astype(str))
+            encoders[col] = le
+            logger.info(f"Encoded {col}: {le.classes_}")
     
     # Scale continuous features if requested
     scaler = None
     if scale_features:
-        # Identify continuous features (all numeric after encoding)
+        # Identify continuous features (all numeric after optional encoding)
         continuous_cols = X.columns.tolist()
         scaler = StandardScaler()
         X[continuous_cols] = scaler.fit_transform(X[continuous_cols])
@@ -220,7 +233,15 @@ def prepare_pipeline_data(filepath=DATA_FILE):
     validation_report = validate_data(df)
     
     # Preprocess features
-    X, y, feature_groups, encoders, scaler = preprocess_features(df)
+    # NOTE: For the main training pipeline, we disable encoding and scaling
+    # here so that all preprocessing is performed inside scikit-learn
+    # Pipelines within the nested cross-validation loops. This avoids
+    # data leakage from fitting transformers on the full dataset.
+    X, y, feature_groups, encoders, scaler = preprocess_features(
+        df,
+        scale_features=False,
+        encode_categorical=False
+    )
     
     results = {
         'X': X,

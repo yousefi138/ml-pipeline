@@ -11,6 +11,9 @@ from sklearn.model_selection import (
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import make_scorer, roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import joblib
 import warnings
 
@@ -106,7 +109,20 @@ class NestedCVTrainer:
         logger.info("TRAINING ELASTIC NET (LogisticRegression L1/L2)")
         logger.info("=" * 60)
         
-        # Define the base model with L1+L2 penalty (elastic net equivalent)
+        # Identify column types for preprocessing
+        categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        numeric_cols = [col for col in X.columns if col not in categorical_cols]
+
+        # Preprocessing: scale numeric features, one-hot encode categoricals
+        transformers = []
+        if numeric_cols:
+            transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+
+        preprocessor = ColumnTransformer(transformers=transformers)
+
+        # Define the base classifier with L1+L2 penalty (elastic net equivalent)
         base_model = LogisticRegression(
             penalty='elasticnet',
             solver='saga',
@@ -115,9 +131,15 @@ class NestedCVTrainer:
             n_jobs=1,
             class_weight='balanced'
         )
+
+        # Full pipeline: preprocessing + classifier
+        pipeline = Pipeline(steps=[
+            ('preprocess', preprocessor),
+            ('clf', base_model)
+        ])
         
         cv_scores = []
-        best_models = []
+        best_models = []  # fitted pipelines per outer fold
         best_params_list = []
         scorers = self._create_scorers()
         
@@ -127,11 +149,14 @@ class NestedCVTrainer:
             
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
+
+            # Adapt hyperparameter grid for pipeline (prefix with 'clf__')
+            param_grid_pipeline = {f"clf__{k}": v for k, v in param_grid.items()}
+
             # Inner CV for hyperparameter tuning
             grid_search = GridSearchCV(
-                base_model,
-                param_grid,
+                pipeline,
+                param_grid_pipeline,
                 cv=self.cv_inner,
                 scoring=CV_SCORING,
                 n_jobs=N_JOBS,
@@ -155,18 +180,18 @@ class NestedCVTrainer:
         
         cv_scores = np.array(cv_scores)
         
-        # Train final model on full data with best hyperparameters
+        # Train final pipeline on full data with best hyperparameters
         # (Use most common best parameters across folds)
         best_params_overall = self._get_most_common_params(best_params_list)
-        final_model = LogisticRegression(
-            penalty='elasticnet',
-            solver='saga',
-            max_iter=1000,
-            random_state=self.random_state,
-            class_weight='balanced',
-            **best_params_overall
-        )
-        final_model.fit(X, y)
+
+        # Rebuild pipeline to ensure a fresh, unfitted preprocessor
+        final_preprocessor = ColumnTransformer(transformers=transformers)
+        final_pipeline = Pipeline(steps=[
+            ('preprocess', final_preprocessor),
+            ('clf', base_model)
+        ])
+        final_pipeline.set_params(**best_params_overall)
+        final_pipeline.fit(X, y)
         
         results = {
             'model_name': 'Elastic Net',
@@ -174,7 +199,7 @@ class NestedCVTrainer:
             'mean_score': cv_scores.mean(),
             'std_score': cv_scores.std(),
             'best_params': best_params_overall,
-            'final_model': final_model,
+            'final_model': final_pipeline,
             'fold_models': best_models,
             'fold_params': best_params_list
         }
@@ -206,15 +231,35 @@ class NestedCVTrainer:
         logger.info("=" * 60)
         logger.info("TRAINING RANDOM FOREST")
         logger.info("=" * 60)
-        
+
+        # Identify column types for preprocessing
+        categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        numeric_cols = [col for col in X.columns if col not in categorical_cols]
+
+        # For Random Forest, scaling is not strictly necessary, but to keep
+        # the preprocessing consistent we scale numeric features and
+        # one-hot encode categoricals within the pipeline.
+        transformers = []
+        if numeric_cols:
+            transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+
+        preprocessor = ColumnTransformer(transformers=transformers)
+
         base_model = RandomForestClassifier(
             random_state=self.random_state,
             n_jobs=1,
             class_weight='balanced'
         )
-        
+
+        pipeline = Pipeline(steps=[
+            ('preprocess', preprocessor),
+            ('clf', base_model)
+        ])
+
         cv_scores = []
-        best_models = []
+        best_models = []  # fitted pipelines per outer fold
         best_params_list = []
         
         fold = 1
@@ -223,22 +268,25 @@ class NestedCVTrainer:
             
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
+
+            # Adapt hyperparameter grid for pipeline (prefix with 'clf__')
+            param_grid_pipeline = {f"clf__{k}": v for k, v in param_grid.items()}
+
             # Inner CV for hyperparameter tuning
             grid_search = GridSearchCV(
-                base_model,
-                param_grid,
+                pipeline,
+                param_grid_pipeline,
                 cv=self.cv_inner,
                 scoring=CV_SCORING,
                 n_jobs=N_JOBS,
                 verbose=0
             )
-            
+
             grid_search.fit(X_train, y_train)
             best_model = grid_search.best_estimator_
             logger.info(f"  Best params: {grid_search.best_params_}")
             logger.info(f"  Inner CV score: {grid_search.best_score_:.4f}")
-            
+
             # Evaluate on outer fold test set
             y_pred_proba = best_model.predict_proba(X_test)[:, 1]
             test_score = roc_auc_score(y_test, y_pred_proba)
@@ -250,15 +298,17 @@ class NestedCVTrainer:
             fold += 1
         
         cv_scores = np.array(cv_scores)
-        
-        # Train final model on full data with best hyperparameters
+
+        # Train final pipeline on full data with best hyperparameters
         best_params_overall = self._get_most_common_params(best_params_list)
-        final_model = RandomForestClassifier(
-            random_state=self.random_state,
-            class_weight='balanced',
-            **best_params_overall
-        )
-        final_model.fit(X, y)
+
+        final_preprocessor = ColumnTransformer(transformers=transformers)
+        final_pipeline = Pipeline(steps=[
+            ('preprocess', final_preprocessor),
+            ('clf', base_model)
+        ])
+        final_pipeline.set_params(**best_params_overall)
+        final_pipeline.fit(X, y)
         
         results = {
             'model_name': 'Random Forest',
@@ -266,7 +316,7 @@ class NestedCVTrainer:
             'mean_score': cv_scores.mean(),
             'std_score': cv_scores.std(),
             'best_params': best_params_overall,
-            'final_model': final_model,
+            'final_model': final_pipeline,
             'fold_models': best_models,
             'fold_params': best_params_list
         }
