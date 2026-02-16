@@ -344,6 +344,14 @@ class NestedCVTrainer:
         """
         params_df = pd.DataFrame(params_list)
         most_common = params_df.mode().iloc[0].to_dict()
+        
+        # Convert float parameters that should be integers back to int type
+        # This handles parameters like max_depth, n_estimators, etc.
+        int_params = ['max_depth', 'n_estimators', 'min_samples_split', 'min_samples_leaf']
+        for param in int_params:
+            if param in most_common and most_common[param] is not None:
+                most_common[param] = int(most_common[param])
+        
         return most_common
 
 
