@@ -347,8 +347,11 @@ class NestedCVTrainer:
         
         # Convert float parameters that should be integers back to int type
         # This handles parameters like max_depth, n_estimators, etc.
+        # Note: parameters may have 'clf__' prefix from pipeline
         int_params = ['max_depth', 'n_estimators', 'min_samples_split', 'min_samples_leaf']
-        for param in int_params:
+        int_params_prefixed = [f'clf__{param}' for param in int_params]
+        
+        for param in int_params + int_params_prefixed:
             if param in most_common and most_common[param] is not None:
                 most_common[param] = int(most_common[param])
         
