@@ -9,8 +9,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 import warnings
 
 from config import (
-    DATA_FILE, TARGET_COLUMN, TIME_COLUMN, CLINICAL_FEATURES,
-    GENE_FEATURES_PREFIX, RANDOM_SEED
+    DATA_FILE, TARGET_COLUMN, TIME_COLUMN, RANDOM_SEED
 )
 from utils import (
     setup_logging, validate_target_variable, check_feature_coverage,
@@ -103,7 +102,7 @@ def validate_data(df, target_column=TARGET_COLUMN):
     logger.info(f"\nTarget variable validation: {target_report}")
     
     # Check feature coverage
-    feature_groups = get_feature_groups(df, GENE_FEATURES_PREFIX, CLINICAL_FEATURES)
+    feature_groups = get_feature_groups(df)
     feature_report = check_feature_coverage(
         df, feature_groups['all_features'], target_column
     )
@@ -175,9 +174,8 @@ def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True, en
     logger.info(f"Features shape before preprocessing: {X.shape}")
     
     # Get feature groups
-    feature_groups = get_feature_groups(X, GENE_FEATURES_PREFIX, CLINICAL_FEATURES)
-    logger.info(f"Clinical features: {len(feature_groups['clinical'])}")
-    logger.info(f"Gene expression features: {len(feature_groups['gene_expression'])}")
+    feature_groups = get_feature_groups(X)
+    logger.info(f"Predictive features: {len(feature_groups['all_features'])}")
     
     encoders = None
     # Identify and optionally encode categorical variables

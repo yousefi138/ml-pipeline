@@ -39,3 +39,9 @@ Goal: I want the pipeline to be robust to misingness in the input data, by addin
 Specfically, I would like to implement 1) a median imputaion approach and 2) an optimized knn approach
 
 In the reporting on the performance evalutaion of the different pipeline methods, I want reporting on these different missingness imputation approaches to be included as well
+
+## 
+Goal: I want the pipeline to be more generalizable and to not rely on names of specific predictive features in order to opperate.
+
+Specifically, can you:
+* Update the pipeline so that the only specific feature names that need to be defined are 'TARGET_COLUMN' and 'TIME_COLUMN' in the `config.py` file? Otherwise, the script should consider all other features supplied in the 'DATA_FILE' as potential predictive features, without calling on their specific names

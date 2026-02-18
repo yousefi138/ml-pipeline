@@ -9,7 +9,7 @@ import shutil
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from config import LOG_LEVEL, LOG_FORMAT, LOGS_DIR
+from config import LOG_LEVEL, LOG_FORMAT, LOGS_DIR, TARGET_COLUMN, TIME_COLUMN
 
 # Module-level flag to ensure log archiving only happens once per session
 _logs_archived = False
@@ -211,34 +211,29 @@ def assess_class_imbalance(y, threshold=0.3):
     return report
 
 
-def get_feature_groups(df, gene_prefix='X', clinical_features=None):
+def get_feature_groups(df):
     """
-    Separate features into clinical and gene expression groups.
+    Extract all predictive features from the dataframe.
+    
+    Automatically excludes TARGET_COLUMN and TIME_COLUMN to get all features
+    available for model training. This function is feature-agnostic and does not
+    require predefined feature group definitions.
     
     Parameters
     ----------
     df : pd.DataFrame
         Input dataframe
-    gene_prefix : str
-        Prefix for gene expression features
-    clinical_features : list
-        List of clinical feature names
     
     Returns
     -------
     feature_groups : dict
-        Dictionary with 'clinical' and 'gene' lists
+        Dictionary with 'all_features' containing all predictive features
     """
-    if clinical_features is None:
-        clinical_features = []
-    
-    all_features = [col for col in df.columns if col not in ['e.tdm', 't.tdm']]
-    gene_features = [col for col in all_features if col.startswith(gene_prefix)]
-    other_clinical = [col for col in all_features if col not in gene_features]
+    # Exclude target and time columns from features
+    exclude_cols = {TARGET_COLUMN, TIME_COLUMN}
+    all_features = [col for col in df.columns if col not in exclude_cols]
     
     feature_groups = {
-        'clinical': other_clinical,
-        'gene_expression': gene_features,
         'all_features': all_features
     }
     

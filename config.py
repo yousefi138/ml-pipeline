@@ -39,11 +39,10 @@ N_JOBS = -1  # Use all available cores
 # Scoring metric for CV
 CV_SCORING = 'roc_auc'
 
-# Feature groups in the dataset
+# Target and time columns
+# All other columns in the dataset will be treated as predictive features
 TARGET_COLUMN = 'e.tdm'
 TIME_COLUMN = 't.tdm'  # Not used in current phase
-CLINICAL_FEATURES = ['age', 'er', 'grade', 'size']
-GENE_FEATURES_PREFIX = 'X'  # Gene expression features start with X
 
 # Model hyperparameter search spaces
 # For LogisticRegression with elastic net penalty, use C (inverse regularization strength)
