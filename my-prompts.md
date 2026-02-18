@@ -26,3 +26,9 @@ Specifically, the project aimed to
 Can you check that this this directory does that? 
 
 Can you identify/debug any errors that this pipeline might encounter when trying to deliver these objectives?
+
+Currently evalutaion.py generates a .json report, model_evaluation_report.json, summarizing how the pipeline has performed. This report currently has all relevant info. However, it is hard to read.
+
+Goal: to see this report, model_evaluation_report.json, in a more human readable html format. 
+
+Can you make an html template for this report and add the production of the html report to the code base?
