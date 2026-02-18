@@ -5,14 +5,68 @@ Provides common helper functions for logging, validation, and model evaluation.
 
 import logging
 import os
+import shutil
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from config import LOG_LEVEL, LOG_FORMAT, LOGS_DIR
 
+# Module-level flag to ensure log archiving only happens once per session
+_logs_archived = False
+
+def archive_old_logs():
+    """
+    Archive old log files to a subdirectory.
+    
+    Creates an 'archive' subdirectory in LOGS_DIR and moves all existing log files
+    to it, keeping only log files from the current run in the main logs directory.
+    This function is called once at the start of each pipeline run.
+    """
+    global _logs_archived
+    
+    if _logs_archived:
+        return
+    
+    _logs_archived = True
+    
+    # Create archive directory if it doesn't exist
+    archive_dir = os.path.join(LOGS_DIR, 'archive')
+    os.makedirs(archive_dir, exist_ok=True)
+    
+    # Get current timestamp (used to identify log files from this run)
+    current_timestamp = datetime.now().strftime('%Y%m%d')
+    
+    # Move log files from previous runs to archive
+    try:
+        for filename in os.listdir(LOGS_DIR):
+            filepath = os.path.join(LOGS_DIR, filename)
+            
+            # Skip if it's a directory
+            if os.path.isdir(filepath):
+                continue
+            
+            # Skip if it's a log file from today (current run)
+            if current_timestamp in filename:
+                continue
+            
+            # Skip if it's not a log file
+            if not filename.endswith('.log'):
+                continue
+            
+            # Move the file to archive
+            dest_path = os.path.join(archive_dir, filename)
+            shutil.move(filepath, dest_path)
+    except Exception as e:
+        # Log a warning but don't fail if archiving fails
+        print(f"Warning: Could not archive old log files: {e}")
+
+
 def setup_logging(script_name):
     """
     Configure logging for the pipeline scripts.
+    
+    Archives old log files on the first call, then creates a logger with
+    file and console handlers.
     
     Parameters
     ----------
@@ -24,6 +78,9 @@ def setup_logging(script_name):
     logger : logging.Logger
         Configured logger instance
     """
+    # Archive old logs on first setup call
+    archive_old_logs()
+    
     # Create logger
     logger = logging.getLogger(script_name)
     logger.setLevel(LOG_LEVEL)
