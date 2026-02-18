@@ -27,6 +27,7 @@ logger = setup_logging('evaluation')
 class ModelEvaluator:
     """
     Comprehensive evaluator for classification models with performance metrics and reporting.
+    Includes reporting on different imputation strategies used during training.
     """
     
     def __init__(self, model_results_dict):
@@ -37,11 +38,13 @@ class ModelEvaluator:
         ----------
         model_results_dict : dict
             Dictionary containing 'elastic_net' and 'random_forest' results
+            Can also include 'imputation_strategy' for single strategy evaluation
         """
         self.results = model_results_dict
         self.en_results = model_results_dict['elastic_net']
         self.rf_results = model_results_dict['random_forest']
         self.best_model_name = model_results_dict['best_model_name']
+        self.imputation_strategy = model_results_dict.get('imputation_strategy', 'unknown')
     
     def generate_cv_summary(self):
         """
@@ -53,7 +56,7 @@ class ModelEvaluator:
             Summary statistics for both models
         """
         logger.info("=" * 60)
-        logger.info("CROSS-VALIDATION SUMMARY")
+        logger.info(f"CROSS-VALIDATION SUMMARY (Imputation: {self.imputation_strategy.upper()})")
         logger.info("=" * 60)
         
         summary_data = {
@@ -63,7 +66,9 @@ class ModelEvaluator:
             'Min CV AUC': [self.en_results['cv_scores'].min(), self.rf_results['cv_scores'].min()],
             'Max CV AUC': [self.en_results['cv_scores'].max(), self.rf_results['cv_scores'].max()],
             'Best Hyperparameters': [str(self.en_results['best_params']), 
-                                     str(self.rf_results['best_params'])]
+                                     str(self.rf_results['best_params'])],
+            'Imputation Strategy': [self.en_results.get('imputation_strategy', 'unknown'), 
+                                    self.rf_results.get('imputation_strategy', 'unknown')]
         }
         
         summary_df = pd.DataFrame(summary_data)
@@ -162,6 +167,7 @@ class ModelEvaluator:
     def create_comprehensive_report(self):
         """
         Create comprehensive evaluation report combining all metrics and summaries.
+        Includes information about imputation strategies used.
         
         Returns
         -------
@@ -169,11 +175,13 @@ class ModelEvaluator:
             Complete evaluation report
         """
         logger.info("\n" + "=" * 60)
-        logger.info("GENERATING COMPREHENSIVE EVALUATION REPORT")
+        logger.info(f"GENERATING COMPREHENSIVE EVALUATION REPORT")
+        logger.info(f"Imputation Strategy: {self.imputation_strategy.upper()}")
         logger.info("=" * 60)
         
         full_report = {
             'timestamp': datetime.now().isoformat(),
+            'imputation_strategy': self.imputation_strategy,
             'best_model': self.best_model_name,
             'cv_summary': self.generate_cv_summary().to_dict(orient='list'),
             'fold_scores': self.generate_fold_scores_report().to_dict(orient='list'),
@@ -182,9 +190,20 @@ class ModelEvaluator:
         
         return full_report
     
-    def save_report_to_json(self, filename='model_evaluation_report.json'):
-        """Save full report to JSON file."""
+    def save_report_to_json(self, filename=None):
+        """
+        Save full report to JSON file.
+        
+        Parameters
+        ----------
+        filename : str, optional
+            Custom filename. If None, uses imputation strategy in filename.
+        """
         report = self.create_comprehensive_report()
+        
+        if filename is None:
+            filename = f"model_evaluation_report_{self.imputation_strategy}.json"
+        
         filepath = f"{REPORTS_DIR}/{filename}"
         
         with open(filepath, 'w') as f:
@@ -193,7 +212,7 @@ class ModelEvaluator:
         logger.info(f"Report saved to {filepath}")
         return filepath
     
-    def generate_html_report(self, json_report=None, filename='model_evaluation_report.html'):
+    def generate_html_report(self, json_report=None, filename=None):
         """
         Generate a human-readable HTML report from the evaluation data.
         
@@ -201,8 +220,8 @@ class ModelEvaluator:
         ----------
         json_report : dict, optional
             Report dictionary. If None, creates a new comprehensive report.
-        filename : str
-            Output filename for the HTML report
+        filename : str, optional
+            Output filename. If None, uses imputation strategy in filename.
         
         Returns
         -------
@@ -212,9 +231,13 @@ class ModelEvaluator:
         if json_report is None:
             json_report = self.create_comprehensive_report()
         
+        if filename is None:
+            filename = f"model_evaluation_report_{self.imputation_strategy}.html"
+        
         # Extract data from report
         timestamp = json_report.get('timestamp', 'Unknown')
         best_model = json_report.get('best_model', 'Unknown')
+        imputation_strategy = json_report.get('imputation_strategy', 'unknown')
         cv_summary = json_report.get('cv_summary', {})
         fold_scores = json_report.get('fold_scores', {})
         params = json_report.get('final_model_parameters', {})
@@ -524,6 +547,7 @@ class ModelEvaluator:
             <!-- Report Metadata -->
             <div class="info-box">
                 <strong>Report Generated:</strong> {timestamp}<br>
+                <strong>Imputation Strategy:</strong> <code>{imputation_strategy.upper()}</code><br>
                 <strong>Best Performing Model:</strong> {best_model} <span class="best-model-badge">✓ Selected</span>
             </div>
             
@@ -703,23 +727,37 @@ class ModelEvaluator:
         
         return html
     
-    def save_summary_to_csv(self, filename='cv_summary.csv'):
-        """Save CV summary to CSV file."""
+    def save_summary_to_csv(self, filename=None):
+        """
+        Save CV summary to CSV file.
+        
+        Parameters
+        ----------
+        filename : str, optional
+            Custom filename. If None, uses imputation strategy in filename.
+        """
         summary = self.generate_cv_summary()
+        
+        if filename is None:
+            filename = f"cv_summary_{self.imputation_strategy}.csv"
+        
         filepath = f"{REPORTS_DIR}/{filename}"
         summary.to_csv(filepath, index=False)
         logger.info(f"Summary saved to {filepath}")
         return filepath
     
-    def plot_cv_scores(self, filename='cv_scores_comparison.png'):
+    def plot_cv_scores(self, filename=None):
         """
         Create visualization comparing CV scores across folds.
         
         Parameters
         ----------
-        filename : str
-            Output filename for the plot
+        filename : str, optional
+            Output filename. If None, uses imputation strategy in filename.
         """
+        if filename is None:
+            filename = f"cv_scores_comparison_{self.imputation_strategy}.png"
+        
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
         folds = np.arange(1, len(self.en_results['cv_scores']) + 1)
@@ -758,15 +796,18 @@ class ModelEvaluator:
         logger.info(f"CV scores plot saved to {filepath}")
         plt.close()
     
-    def plot_model_comparison(self, filename='model_comparison.png'):
+    def plot_model_comparison(self, filename=None):
         """
         Create bar plot comparing mean CV AUCs with error bars.
         
         Parameters
         ----------
-        filename : str
-            Output filename for the plot
+        filename : str, optional
+            Output filename. If None, uses imputation strategy in filename.
         """
+        if filename is None:
+            filename = f"model_comparison_{self.imputation_strategy}.png"
+        
         models = [self.en_results['model_name'], self.rf_results['model_name']]
         means = [self.en_results['mean_score'], self.rf_results['mean_score']]
         stds = [self.en_results['std_score'], self.rf_results['std_score']]

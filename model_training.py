@@ -1,6 +1,7 @@
 """
 Model training with nested cross-validation.
 Implements two models (Elastic Net and Random Forest) with hyperparameter tuning.
+Includes multiple imputation strategies for robust handling of missing data.
 """
 
 import numpy as np
@@ -23,6 +24,9 @@ from config import (
     STRATIFIED_CV, METRICS, MODELS_DIR
 )
 from utils import setup_logging, format_cv_results
+from imputation import (
+    get_imputation_transformer, MissingnessAnalyzer
+)
 
 warnings.filterwarnings('ignore')
 logger = setup_logging('model_training')
@@ -34,10 +38,11 @@ np.random.seed(RANDOM_SEED)
 class NestedCVTrainer:
     """
     Trainer class implementing nested cross-validation for model evaluation and hyperparameter tuning.
+    Supports multiple imputation strategies for handling missing data within the CV framework.
     """
     
     def __init__(self, n_splits_outer=N_SPLITS_OUTER, n_splits_inner=N_SPLITS_INNER,
-                 stratified=STRATIFIED_CV, random_state=RANDOM_SEED):
+                 stratified=STRATIFIED_CV, random_state=RANDOM_SEED, imputation_strategy='median'):
         """
         Initialize the nested CV trainer.
         
@@ -51,11 +56,14 @@ class NestedCVTrainer:
             Whether to use stratified k-fold
         random_state : int
             Random seed for reproducibility
+        imputation_strategy : str
+            Imputation strategy: 'median', 'knn', or 'none'
         """
         self.n_splits_outer = n_splits_outer
         self.n_splits_inner = n_splits_inner
         self.stratified = stratified
         self.random_state = random_state
+        self.imputation_strategy = imputation_strategy
         
         # Define CV splitters
         if self.stratified:
@@ -75,6 +83,7 @@ class NestedCVTrainer:
             )
         
         logger.info(f"Initialized NestedCVTrainer: {n_splits_outer}-fold outer CV, {n_splits_inner}-fold inner CV")
+        logger.info(f"Imputation strategy: {imputation_strategy}")
     
     def _create_scorers(self):
         """Create scoring functions for cross-validation."""
@@ -106,21 +115,36 @@ class NestedCVTrainer:
             Dictionary containing CV scores, best params, and models
         """
         logger.info("=" * 60)
-        logger.info("TRAINING ELASTIC NET (LogisticRegression L1/L2)")
+        logger.info(f"TRAINING ELASTIC NET (LogisticRegression L1/L2)")
+        logger.info(f"Imputation: {self.imputation_strategy.upper()}")
         logger.info("=" * 60)
+        
+        # Analyze missingness before training
+        MissingnessAnalyzer.report_missingness(X, prefix="  ")
         
         # Identify column types for preprocessing
         categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
         numeric_cols = [col for col in X.columns if col not in categorical_cols]
 
-        # Preprocessing: scale numeric features, one-hot encode categoricals
-        transformers = []
-        if numeric_cols:
-            transformers.append(('num', StandardScaler(), numeric_cols))
-        if categorical_cols:
-            transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+        # Create imputation transformer
+        imputer = get_imputation_transformer(self.imputation_strategy)
 
-        preprocessor = ColumnTransformer(transformers=transformers)
+        # Build preprocessing pipeline: imputation -> scaling/encoding
+        # Step 1: Imputation (applied to all columns)
+        # Step 2: Column-specific preprocessing (scaling numeric, encoding categorical)
+        scaling_encoding_transformers = []
+        if numeric_cols:
+            scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+        
+        column_preprocessor = ColumnTransformer(transformers=scaling_encoding_transformers)
+        
+        # Full preprocessing pipeline: imputation -> scaling/encoding
+        preprocessing_pipeline = Pipeline(steps=[
+            ('impute', imputer),
+            ('scale_encode', column_preprocessor)
+        ])
 
         # Define the base classifier with L1+L2 penalty (elastic net equivalent)
         base_model = LogisticRegression(
@@ -134,7 +158,7 @@ class NestedCVTrainer:
 
         # Full pipeline: preprocessing + classifier
         pipeline = Pipeline(steps=[
-            ('preprocess', preprocessor),
+            ('preprocess', preprocessing_pipeline),
             ('clf', base_model)
         ])
         
@@ -185,9 +209,21 @@ class NestedCVTrainer:
         best_params_overall = self._get_most_common_params(best_params_list)
 
         # Rebuild pipeline to ensure a fresh, unfitted preprocessor
-        final_preprocessor = ColumnTransformer(transformers=transformers)
+        final_imputer = get_imputation_transformer(self.imputation_strategy)
+        final_scaling_encoding_transformers = []
+        if numeric_cols:
+            final_scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+        
+        final_column_preprocessor = ColumnTransformer(transformers=final_scaling_encoding_transformers)
+        final_preprocessing_pipeline = Pipeline(steps=[
+            ('impute', final_imputer),
+            ('scale_encode', final_column_preprocessor)
+        ])
+        
         final_pipeline = Pipeline(steps=[
-            ('preprocess', final_preprocessor),
+            ('preprocess', final_preprocessing_pipeline),
             ('clf', base_model)
         ])
         final_pipeline.set_params(**best_params_overall)
@@ -195,6 +231,7 @@ class NestedCVTrainer:
         
         results = {
             'model_name': 'Elastic Net',
+            'imputation_strategy': self.imputation_strategy,
             'cv_scores': cv_scores,
             'mean_score': cv_scores.mean(),
             'std_score': cv_scores.std(),
@@ -204,7 +241,7 @@ class NestedCVTrainer:
             'fold_params': best_params_list
         }
         
-        logger.info(f"\nElastic Net CV Results:")
+        logger.info(f"\nElastic Net CV Results ({self.imputation_strategy}):")
         logger.info(f"  Mean AUC: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
         logger.info("=" * 60)
         
@@ -229,23 +266,36 @@ class NestedCVTrainer:
             Dictionary containing CV scores, best params, and models
         """
         logger.info("=" * 60)
-        logger.info("TRAINING RANDOM FOREST")
+        logger.info(f"TRAINING RANDOM FOREST")
+        logger.info(f"Imputation: {self.imputation_strategy.upper()}")
         logger.info("=" * 60)
+        
+        # Analyze missingness before training
+        MissingnessAnalyzer.report_missingness(X, prefix="  ")
 
         # Identify column types for preprocessing
         categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
         numeric_cols = [col for col in X.columns if col not in categorical_cols]
 
-        # For Random Forest, scaling is not strictly necessary, but to keep
-        # the preprocessing consistent we scale numeric features and
-        # one-hot encode categoricals within the pipeline.
-        transformers = []
-        if numeric_cols:
-            transformers.append(('num', StandardScaler(), numeric_cols))
-        if categorical_cols:
-            transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+        # Create imputation transformer
+        imputer = get_imputation_transformer(self.imputation_strategy)
 
-        preprocessor = ColumnTransformer(transformers=transformers)
+        # For Random Forest, scaling is not strictly necessary, but to keep
+        # the preprocessing consistent we impute, scale numeric features and
+        # one-hot encode categoricals within the pipeline.
+        scaling_encoding_transformers = []
+        if numeric_cols:
+            scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+        
+        column_preprocessor = ColumnTransformer(transformers=scaling_encoding_transformers)
+        
+        # Full preprocessing pipeline: imputation -> scaling/encoding
+        preprocessing_pipeline = Pipeline(steps=[
+            ('impute', imputer),
+            ('scale_encode', column_preprocessor)
+        ])
 
         base_model = RandomForestClassifier(
             random_state=self.random_state,
@@ -254,7 +304,7 @@ class NestedCVTrainer:
         )
 
         pipeline = Pipeline(steps=[
-            ('preprocess', preprocessor),
+            ('preprocess', preprocessing_pipeline),
             ('clf', base_model)
         ])
 
@@ -302,9 +352,21 @@ class NestedCVTrainer:
         # Train final pipeline on full data with best hyperparameters
         best_params_overall = self._get_most_common_params(best_params_list)
 
-        final_preprocessor = ColumnTransformer(transformers=transformers)
+        final_imputer = get_imputation_transformer(self.imputation_strategy)
+        final_scaling_encoding_transformers = []
+        if numeric_cols:
+            final_scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+        
+        final_column_preprocessor = ColumnTransformer(transformers=final_scaling_encoding_transformers)
+        final_preprocessing_pipeline = Pipeline(steps=[
+            ('impute', final_imputer),
+            ('scale_encode', final_column_preprocessor)
+        ])
+        
         final_pipeline = Pipeline(steps=[
-            ('preprocess', final_preprocessor),
+            ('preprocess', final_preprocessing_pipeline),
             ('clf', base_model)
         ])
         final_pipeline.set_params(**best_params_overall)
@@ -312,6 +374,7 @@ class NestedCVTrainer:
         
         results = {
             'model_name': 'Random Forest',
+            'imputation_strategy': self.imputation_strategy,
             'cv_scores': cv_scores,
             'mean_score': cv_scores.mean(),
             'std_score': cv_scores.std(),
@@ -321,7 +384,7 @@ class NestedCVTrainer:
             'fold_params': best_params_list
         }
         
-        logger.info(f"\nRandom Forest CV Results:")
+        logger.info(f"\nRandom Forest CV Results ({self.imputation_strategy}):")
         logger.info(f"  Mean AUC: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
         logger.info("=" * 60)
         
@@ -358,7 +421,7 @@ class NestedCVTrainer:
         return most_common
 
 
-def run_full_pipeline(X, y):
+def run_full_pipeline(X, y, imputation_strategy='median'):
     """
     Run complete model training pipeline with both models.
     
@@ -368,6 +431,8 @@ def run_full_pipeline(X, y):
         Feature matrix
     y : pd.Series
         Target variable
+    imputation_strategy : str
+        Imputation strategy: 'median', 'knn', or 'none'
     
     Returns
     -------
@@ -375,13 +440,15 @@ def run_full_pipeline(X, y):
         Dictionary containing results from both models
     """
     logger.info("\n" + "=" * 60)
-    logger.info("NESTED CROSS-VALIDATION TRAINING PIPELINE")
+    logger.info(f"NESTED CROSS-VALIDATION TRAINING PIPELINE")
+    logger.info(f"Imputation Strategy: {imputation_strategy.upper()}")
     logger.info("=" * 60)
     
     trainer = NestedCVTrainer(
         n_splits_outer=N_SPLITS_OUTER,
         n_splits_inner=N_SPLITS_INNER,
-        stratified=STRATIFIED_CV
+        stratified=STRATIFIED_CV,
+        imputation_strategy=imputation_strategy
     )
     
     # Train Elastic Net
@@ -395,22 +462,25 @@ def run_full_pipeline(X, y):
                        else rf_results['model_name'])
     
     logger.info("\n" + "=" * 60)
-    logger.info("BEST MODEL COMPARISON")
+    logger.info(f"BEST MODEL COMPARISON ({imputation_strategy.upper()})")
     logger.info("=" * 60)
     logger.info(f"Elastic Net CV AUC: {en_results['mean_score']:.4f} (+/- {en_results['std_score']:.4f})")
     logger.info(f"Random Forest CV AUC: {rf_results['mean_score']:.4f} (+/- {rf_results['std_score']:.4f})")
     logger.info(f"Best Model: {best_model_name}")
     logger.info("=" * 60)
     
-    # Save models
-    joblib.dump(en_results['final_model'], f"{MODELS_DIR}/elastic_net_final.pkl")
-    joblib.dump(rf_results['final_model'], f"{MODELS_DIR}/random_forest_final.pkl")
-    logger.info(f"Models saved to {MODELS_DIR}/")
+    # Save models with imputation strategy in filename
+    en_filename = f"{MODELS_DIR}/elastic_net_{imputation_strategy}_final.pkl"
+    rf_filename = f"{MODELS_DIR}/random_forest_{imputation_strategy}_final.pkl"
+    joblib.dump(en_results['final_model'], en_filename)
+    joblib.dump(rf_results['final_model'], rf_filename)
+    logger.info(f"Models saved to {MODELS_DIR}/ with suffix '_{imputation_strategy}'")
     
     results = {
         'elastic_net': en_results,
         'random_forest': rf_results,
-        'best_model_name': best_model_name
+        'best_model_name': best_model_name,
+        'imputation_strategy': imputation_strategy
     }
     
     return results

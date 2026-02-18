@@ -32,3 +32,10 @@ Currently evalutaion.py generates a .json report, model_evaluation_report.json, 
 Goal: to see this report, model_evaluation_report.json, in a more human readable html format. 
 
 Can you make an html template for this report and add the production of the html report to the code base?
+
+##
+Goal: I want the pipeline to be robust to misingness in the input data, by adding multiple approaches to missingness imputation implemented within the cross-validation framework to avoid any potential for data leakage. 
+
+Specfically, I would like to implement 1) a median imputaion approach and 2) an optimized knn approach
+
+In the reporting on the performance evalutaion of the different pipeline methods, I want reporting on these different missingness imputation approaches to be included as well

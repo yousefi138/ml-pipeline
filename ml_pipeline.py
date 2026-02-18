@@ -1,6 +1,7 @@
 """
 Main ML Pipeline Orchestration Script
 Orchestrates the complete workflow: data preparation, model training, and evaluation.
+Supports multiple imputation strategies for robust handling of missing data.
 """
 
 import sys
@@ -17,6 +18,7 @@ from config import (
 from data_prep import prepare_pipeline_data
 from model_training import run_full_pipeline
 from evaluation import generate_full_evaluation_report
+from imputation import MissingnessAnalyzer
 from utils import setup_logging
 
 logger = setup_logging('ml_pipeline_main')
@@ -31,10 +33,10 @@ def print_header(title):
 
 def main():
     """
-    Execute the complete ML pipeline workflow.
+    Execute the complete ML pipeline workflow with multiple imputation strategies.
     """
     
-    print_header("ML Pipeline - Scalable & Reproducible Supervised Learning")
+    print_header("ML Pipeline - Robust to Missingness with Multiple Imputation Strategies")
     logger.info(f"Pipeline started at {datetime.now().isoformat()}")
     logger.info(f"Project path: {PROJECT_PATH}")
     logger.info(f"Data file: {DATA_FILE}")
@@ -53,33 +55,80 @@ def main():
         logger.info(f"  - Features: {X.shape[1]}")
         logger.info(f"  - Target classes: {y.nunique()}")
         
-        # ====== STEP 2: MODEL TRAINING WITH NESTED CV ======
-        print_header("Step 2: Model Training with Nested Cross-Validation")
-        logger.info("Initiating model training with nested 5-fold CV...")
+        # ====== STEP 1.5: ASSESS MISSINGNESS ======
+        print_header("Step 1.5: Missingness Assessment")
+        logger.info("Analyzing missing data patterns...")
         
-        results = run_full_pipeline(X, y)
+        missingness_analysis = MissingnessAnalyzer.assess_missingness(X)
+        MissingnessAnalyzer.report_missingness(X, prefix="  ")
         
-        logger.info(f"✓ Model training completed")
-        logger.info(f"  - Best model: {results['best_model_name']}")
-        logger.info(f"  - Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
-        logger.info(f"  - Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
+        if missingness_analysis['total_missing_values'] == 0:
+            logger.warning("No missing values detected in the dataset.")
+            logger.warning("Running pipeline with median imputation as baseline (no-op for this data).")
+        
+        # ====== STEP 2: MODEL TRAINING WITH MULTIPLE IMPUTATION STRATEGIES ======
+        print_header("Step 2: Model Training with Multiple Imputation Strategies")
+        logger.info("Training models with different imputation approaches...")
+        
+        # Define imputation strategies to test
+        imputation_strategies = ['median', 'knn']
+        all_results = {}
+        strategy_summary = []
+        
+        for strategy in imputation_strategies:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Training pipeline with {strategy.upper()} imputation")
+            logger.info(f"{'='*60}")
+            
+            results = run_full_pipeline(X, y, imputation_strategy=strategy)
+            all_results[strategy] = results
+            
+            # Store summary for later comparison
+            strategy_summary.append({
+                'Imputation Strategy': strategy.upper(),
+                'Elastic Net Mean AUC': results['elastic_net']['mean_score'],
+                'Elastic Net Std AUC': results['elastic_net']['std_score'],
+                'Random Forest Mean AUC': results['random_forest']['mean_score'],
+                'Random Forest Std AUC': results['random_forest']['std_score'],
+                'Best Model': results['best_model_name']
+            })
+            
+            logger.info(f"✓ {strategy.upper()} imputation training completed")
+            logger.info(f"  - Best model: {results['best_model_name']}")
+            logger.info(f"  - Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
+            logger.info(f"  - Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
         
         # ====== STEP 3: EVALUATION AND REPORTING ======
         print_header("Step 3: Evaluation and Comprehensive Reporting")
-        logger.info("Generating evaluation reports and visualizations...")
+        logger.info("Generating evaluation reports and visualizations for each strategy...")
         
-        generate_full_evaluation_report(results)
+        for strategy, results in all_results.items():
+            logger.info(f"\nGenerating reports for {strategy.upper()} imputation...")
+            generate_full_evaluation_report(results)
         
-        logger.info(f"✓ Evaluation completed")
+        logger.info(f"✓ Evaluation completed for all strategies")
         logger.info(f"  - Reports saved to: {REPORTS_DIR}/")
         logger.info(f"  - Models saved to: {MODELS_DIR}/")
         
+        # ====== STEP 4: IMPUTATION STRATEGY COMPARISON ======
+        print_header("Step 4: Imputation Strategy Comparison")
+        logger.info("Comparing performance across imputation strategies...")
+        
+        strategy_comparison_df = pd.DataFrame(strategy_summary)
+        logger.info("\nImputation Strategy Performance Comparison:")
+        logger.info(f"\n{strategy_comparison_df.to_string(index=False)}")
+        
+        # Save strategy comparison to CSV
+        strategy_comparison_path = f"{REPORTS_DIR}/imputation_strategy_comparison.csv"
+        strategy_comparison_df.to_csv(strategy_comparison_path, index=False)
+        logger.info(f"\nStrategy comparison saved to {strategy_comparison_path}")
+        
         # ====== PIPELINE SUMMARY ======
-        print_header("Pipeline Summary")
+        print_header("Pipeline Summary: Missingness Imputation Analysis")
         
         summary_text = f"""
-        Pipeline Execution Summary
-        ──────────────────────────────────────────────────
+        ML Pipeline Execution Summary: Robust Missingness Handling
+        ──────────────────────────────────────────────────────────────
         
         DATA
           • Total samples: {X.shape[0]}
@@ -87,25 +136,32 @@ def main():
           • Target classes: {y.nunique()}
           • Class distribution: {dict(y.value_counts())}
         
-        MODELS TRAINED
-          • Elastic Net (LogisticRegression with L1/L2)
-            - Mean CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})
-            - Best params: {results['elastic_net']['best_params']}
-          
-          • Random Forest
-            - Mean CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})
-            - Best params: {results['random_forest']['best_params']}
+        MISSINGNESS ANALYSIS
+          • Total missing values: {missingness_analysis['total_missing_values']}
+          • Percent missing: {missingness_analysis['percent_total_missing']:.2f}%
+          • Features with missing values: {len(missingness_analysis['features_with_missing'])}
+          {format_missing_features(missingness_analysis)}
         
-        BEST MODEL
-          • Model: {results['best_model_name']}
-          • CV AUC: {max(results['elastic_net']['mean_score'], results['random_forest']['mean_score']):.4f}
+        IMPUTATION STRATEGIES TESTED
+        {format_strategy_results(all_results)}
+        
+        STRATEGY COMPARISON
+        {strategy_comparison_df.to_string(index=False)}
         
         OUTPUTS
           • Reports: {REPORTS_DIR}/
+            - Per-strategy HTML, JSON, and CSV reports
+            - Overall strategy comparison CSV
           • Models: {MODELS_DIR}/
-          • Visualizations: CV scores and model comparison plots
+            - Best models for each imputation strategy
+          • Visualizations: CV scores and model comparison plots for each strategy
         
-        ──────────────────────────────────────────────────
+        KEY INSIGHTS
+          • Multiple imputation strategies tested: {', '.join(s.upper() for s in imputation_strategies)}
+          • Best overall model selection: Based on cross-validation AUC
+          • Data leakage prevention: Imputation fitted only on training folds
+        
+        ──────────────────────────────────────────────────────────────
         """
         
         logger.info(summary_text)
@@ -114,12 +170,86 @@ def main():
         logger.info(f"Pipeline completed successfully at {datetime.now().isoformat()}")
         print("\n" + "=" * 80)
         print("  ✓ ML PIPELINE EXECUTION COMPLETED SUCCESSFULLY")
+        print("  ✓ Multiple imputation strategies evaluated and compared")
+        print("=" * 80 + "\n")
+        
+        return all_results
+    
+    except Exception as e:
+        error_msg = f"Pipeline failed with error: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        print(f"\n✗ ERROR: {error_msg}")
+        sys.exit(1)
+
+
+def format_missing_features(analysis):
+    """Format missing features summary for display."""
+    if not analysis['features_with_missing']:
+        return "          • No missing values detected"
+    
+    lines = ["          • Missing by feature:"]
+    for feature, count in sorted(analysis['features_with_missing'].items()):
+        pct = analysis['percent_missing_by_feature'][feature]
+        lines.append(f"            - {feature}: {count} ({pct:.2f}%)")
+    return "\n".join(lines)
+
+
+def format_strategy_results(all_results):
+    """Format strategy results for display."""
+    lines = []
+    for strategy, results in all_results.items():
+        lines.append(f"\n        {strategy.upper()} IMPUTATION")
+        lines.append(f"          • Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
+        lines.append(f"          • Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
+        lines.append(f"          • Best Model: {results['best_model_name']}")
+    return "\n".join(lines)
+
+
+def main_single_strategy(imputation_strategy='median'):
+    """
+    Execute the ML pipeline with a single imputation strategy.
+    Useful for focused analysis on one approach.
+    
+    Parameters
+    ----------
+    imputation_strategy : str
+        Imputation strategy: 'median' or 'knn'
+    """
+    
+    print_header(f"ML Pipeline - Single Strategy ({imputation_strategy.upper()})")
+    logger.info(f"Pipeline started at {datetime.now().isoformat()}")
+    logger.info(f"Imputation strategy: {imputation_strategy.upper()}")
+    
+    try:
+        # Data preparation
+        print_header("Step 1: Data Loading and Preparation")
+        data = prepare_pipeline_data()
+        X = data['X']
+        y = data['y']
+        
+        logger.info(f"✓ Data preparation completed")
+        logger.info(f"  - Samples: {X.shape[0]}")
+        logger.info(f"  - Features: {X.shape[1]}")
+        
+        # Model training
+        print_header(f"Step 2: Model Training ({imputation_strategy.upper()} Imputation)")
+        results = run_full_pipeline(X, y, imputation_strategy=imputation_strategy)
+        
+        # Evaluation and reporting
+        print_header("Step 3: Evaluation and Reporting")
+        generate_full_evaluation_report(results)
+        
+        logger.info(f"✓ Pipeline completed successfully")
+        logger.info(f"  - Best model: {results['best_model_name']}")
+        
+        print("\n" + "=" * 80)
+        print(f"  ✓ ML PIPELINE COMPLETED ({imputation_strategy.upper()} IMPUTATION)")
         print("=" * 80 + "\n")
         
         return results
     
     except Exception as e:
-        error_msg = f"Pipeline failed with error: {str(e)}"
+        error_msg = f"Pipeline failed: {str(e)}"
         logger.error(error_msg, exc_info=True)
         print(f"\n✗ ERROR: {error_msg}")
         sys.exit(1)
