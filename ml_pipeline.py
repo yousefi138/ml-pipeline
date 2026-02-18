@@ -5,6 +5,8 @@ Supports multiple imputation strategies for robust handling of missing data.
 """
 
 import sys
+import argparse
+import os
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -36,17 +38,52 @@ def main():
     Execute the complete ML pipeline workflow with multiple imputation strategies.
     """
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='ML Pipeline with Robust Missingness Handling',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python ml_pipeline.py
+  python ml_pipeline.py --dataset breast_cancer_survival.csv
+  python ml_pipeline.py --dataset /full/path/to/breast_cancer_survival.csv
+        '''
+    )
+    parser.add_argument(
+        '--dataset',
+        type=str,
+        default=None,
+        help='Path to the input dataset (CSV file). If not provided, uses default from config. '
+             'Can be a filename (assumed to be in data/ directory) or full path.'
+    )
+    
+    args = parser.parse_args()
+    
+    # Determine the dataset path to use
+    if args.dataset:
+        dataset_path = args.dataset
+        # If it's just a filename (no path separators), assume it's in the data directory
+        if os.sep not in dataset_path and '/' not in dataset_path:
+            dataset_path = os.path.join(os.path.dirname(PROJECT_PATH), 'data', dataset_path)
+    else:
+        dataset_path = DATA_FILE
+    
+    # Validate that the dataset exists
+    if not os.path.exists(dataset_path):
+        print(f"Error: Dataset not found at {dataset_path}", file=sys.stderr)
+        sys.exit(1)
+    
     print_header("ML Pipeline - Robust to Missingness with Multiple Imputation Strategies")
     logger.info(f"Pipeline started at {datetime.now().isoformat()}")
     logger.info(f"Project path: {PROJECT_PATH}")
-    logger.info(f"Data file: {DATA_FILE}")
+    logger.info(f"Data file: {dataset_path}")
     
     try:
         # ====== STEP 1: DATA PREPARATION ======
         print_header("Step 1: Data Loading and Preparation")
         logger.info("Initiating data preparation...")
         
-        data = prepare_pipeline_data()
+        data = prepare_pipeline_data(dataset_path)
         X = data['X']
         y = data['y']
         
