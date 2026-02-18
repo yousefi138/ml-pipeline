@@ -2,10 +2,20 @@
 Model training with nested cross-validation.
 Implements two models (Elastic Net and Random Forest) with hyperparameter tuning.
 Includes multiple imputation strategies for robust handling of missing data.
+
+Also supports benchmarking pre-defined linear prediction scores supplied in
+`score*.csv` files in the data directory. These scores are evaluated within
+the same cross-validation and imputation framework for like-for-like
+comparison of predictive performance.
 """
+
+import os
+import glob
+import warnings
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.model_selection import (
     StratifiedKFold, GridSearchCV, cross_val_score, cross_validate
 )
@@ -16,12 +26,11 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import joblib
-import warnings
 
 from config import (
     RANDOM_SEED, N_SPLITS_OUTER, N_SPLITS_INNER, N_JOBS,
     CV_SCORING, ELASTIC_NET_PARAMS, RANDOM_FOREST_PARAMS,
-    STRATIFIED_CV, METRICS, MODELS_DIR
+    STRATIFIED_CV, METRICS, MODELS_DIR, DATA_DIR
 )
 from utils import setup_logging, format_cv_results
 from imputation import (
@@ -33,6 +42,83 @@ logger = setup_logging('model_training')
 
 # Set random seed for reproducibility
 np.random.seed(RANDOM_SEED)
+
+
+class PredefinedLinearScore(BaseEstimator, ClassifierMixin):
+    """Classifier wrapper for pre-defined linear prediction scores.
+
+    This estimator applies fixed coefficients (and optional intercept) to
+    a subset of input features to produce a linear risk score. A logistic
+    transform is used to map scores to probabilities so that AUC is
+    comparable with other models, but any monotone transform yields the
+    same ROC AUC.
+
+    Parameters
+    ----------
+    name : str
+        Human-readable name for the score (used in reporting).
+    coefficients : dict
+        Mapping from feature name to coefficient.
+    intercept : float, optional
+        Intercept term for the score (default 0.0).
+    positive_class : int or str, optional
+        Label of the positive class (default 1).
+    """
+
+    def __init__(self, name, coefficients, intercept=0.0, positive_class=1):
+        self.name = name
+        self.coefficients = coefficients
+        self.intercept = intercept
+        self.positive_class = positive_class
+
+    def fit(self, X, y=None):  # noqa: D401
+        """Fit the score model.
+
+        No learning is performed; this simply validates that all required
+        features are present and caches their order for fast scoring.
+        """
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+        self.feature_names_ = list(X_df.columns)
+
+        missing_features = [
+            feat for feat in self.coefficients.keys() if feat not in self.feature_names_
+        ]
+        if missing_features:
+            raise ValueError(
+                f"Predefined score '{self.name}' requires missing features: {missing_features}"
+            )
+
+        self.used_features_ = [feat for feat in self.feature_names_ if feat in self.coefficients]
+        self.coef_vector_ = np.array([
+            self.coefficients[feat] for feat in self.used_features_
+        ], dtype=float)
+
+        # Binary classes assumed {0, 1}
+        self.classes_ = np.array([0, 1])
+        return self
+
+    def decision_function(self, X):
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+        scores = np.dot(X_df[self.used_features_].values, self.coef_vector_) + self.intercept
+        return scores
+
+    def predict_proba(self, X):
+        scores = self.decision_function(X)
+        # Logistic transform for probabilities
+        probs_pos = 1.0 / (1.0 + np.exp(-scores))
+        probs_neg = 1.0 - probs_pos
+        return np.vstack([probs_neg, probs_pos]).T
+
+    def predict(self, X):
+        probs = self.predict_proba(X)[:, 1]
+        return (probs >= 0.5).astype(int)
+
+    def get_score_coefficients(self):
+        """Return coefficient mapping used for this score."""
+        return {
+            'intercept': float(self.intercept),
+            'coefficients': {k: float(v) for k, v in self.coefficients.items()}
+        }
 
 
 class NestedCVTrainer:
@@ -421,6 +507,168 @@ class NestedCVTrainer:
         return most_common
 
 
+def _load_predefined_scores():
+    """Load all predefined linear scores from score*.csv files in DATA_DIR.
+
+    Each score file is expected to have at least two columns: ``var`` and
+    ``coef``. The ``var`` column contains feature names; a special row with
+    ``var`` equal to ``intercept``, ``(intercept)``, or ``const`` (case
+    insensitive) is treated as the intercept term.
+
+    Returns
+    -------
+    scores : dict
+        Mapping from score identifier to a dict with keys ``name``,
+        ``coefficients``, and ``intercept``.
+    """
+    pattern = os.path.join(DATA_DIR, 'score*.csv')
+    files = glob.glob(pattern)
+
+    scores = {}
+    if not files:
+        logger.info("No predefined score files found matching 'score*.csv'.")
+        return scores
+
+    logger.info(f"Found {len(files)} predefined score file(s) in data directory.")
+
+    for path in files:
+        try:
+            df = pd.read_csv(path)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"Could not read score file {path}: {exc}")
+            continue
+
+        if not {'var', 'coef'}.issubset(df.columns):
+            logger.warning(
+                f"Score file {path} does not contain required columns 'var' and 'coef'; skipping."
+            )
+            continue
+
+        basename = os.path.splitext(os.path.basename(path))[0]
+        score_name = basename
+
+        coefficients = {}
+        intercept = 0.0
+        for _, row in df.iterrows():
+            var_name = str(row['var'])
+            coef_val = float(row['coef'])
+            lower = var_name.lower()
+            if lower in {'intercept', '(intercept)', 'const'}:
+                intercept = coef_val
+            else:
+                coefficients[var_name] = coef_val
+
+        if not coefficients:
+            logger.warning(f"Score file {path} defines no feature coefficients; skipping.")
+            continue
+
+        scores[score_name] = {
+            'name': score_name,
+            'coefficients': coefficients,
+            'intercept': intercept
+        }
+
+        logger.info(
+            f"Loaded predefined score '{score_name}' with {len(coefficients)} coefficients "
+            f"and intercept {intercept:.4f} from {path}"
+        )
+
+    return scores
+
+
+def evaluate_predefined_scores(X, y, imputation_strategy='median'):
+    """Evaluate all predefined linear scores under a given imputation strategy.
+
+    The scores are evaluated using the same outer cross-validation
+    configuration as the main models, with imputation fitted within each
+    training fold to avoid data leakage.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature matrix.
+    y : pd.Series
+        Target variable.
+    imputation_strategy : str
+        Imputation strategy: 'median' or 'knn'.
+
+    Returns
+    -------
+    results : dict
+        Dictionary mapping score name to a results dictionary compatible
+        with the rest of the pipeline reporting.
+    """
+    score_defs = _load_predefined_scores()
+    if not score_defs:
+        return {}
+
+    logger.info(
+        f"Evaluating {len(score_defs)} predefined linear score(s) "
+        f"with {imputation_strategy.upper()} imputation."
+    )
+
+    results = {}
+    cv_outer = StratifiedKFold(
+        n_splits=N_SPLITS_OUTER, shuffle=True, random_state=RANDOM_SEED
+    )
+
+    for key, meta in score_defs.items():
+        score_name = meta['name']
+        coefficients = meta['coefficients']
+        intercept = meta['intercept']
+
+        logger.info(
+            f"Evaluating predefined score '{score_name}' "
+            f"({len(coefficients)} features, intercept={intercept:.4f})."
+        )
+
+        imputer = get_imputation_transformer(imputation_strategy)
+        score_estimator = PredefinedLinearScore(
+            name=score_name,
+            coefficients=coefficients,
+            intercept=intercept
+        )
+
+        pipeline = Pipeline(steps=[
+            ('impute', imputer),
+            ('score', score_estimator)
+        ])
+
+        # Cross-validated AUC scores
+        cv_scores = cross_val_score(
+            pipeline,
+            X,
+            y,
+            cv=cv_outer,
+            scoring=CV_SCORING,
+            n_jobs=N_JOBS
+        )
+
+        cv_scores = np.array(cv_scores)
+
+        # Fit final pipeline on full data for potential downstream use
+        pipeline.fit(X, y)
+
+        results[key] = {
+            'model_name': f"Score: {score_name}",
+            'imputation_strategy': imputation_strategy,
+            'cv_scores': cv_scores,
+            'mean_score': cv_scores.mean(),
+            'std_score': cv_scores.std(),
+            'best_params': None,
+            'final_model': pipeline,
+            'fold_models': None,
+            'fold_params': None
+        }
+
+        logger.info(
+            f"Predefined score '{score_name}' CV AUC: "
+            f"{cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})"
+        )
+
+    return results
+
+
 def run_full_pipeline(X, y, imputation_strategy='median'):
     """
     Run complete model training pipeline with both models.
@@ -456,17 +704,42 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     
     # Train Random Forest
     rf_results = trainer.train_random_forest(X, y)
+
+    # Evaluate any predefined linear scores for this strategy
+    linear_score_results = evaluate_predefined_scores(X, y, imputation_strategy=imputation_strategy)
+    if linear_score_results:
+        logger.info(
+            f"Evaluated {len(linear_score_results)} predefined score model(s) "
+            f"under {imputation_strategy.upper()} imputation."
+        )
+    else:
+        logger.info("No predefined score models evaluated (none configured).")
     
-    # Determine best model
-    best_model_name = (en_results['model_name'] if en_results['mean_score'] > rf_results['mean_score']
-                       else rf_results['model_name'])
+    # Determine best model among the trained ML models (Elastic Net vs RF)
+    best_model_name = (
+        en_results['model_name']
+        if en_results['mean_score'] > rf_results['mean_score']
+        else rf_results['model_name']
+    )
     
     logger.info("\n" + "=" * 60)
     logger.info(f"BEST MODEL COMPARISON ({imputation_strategy.upper()})")
     logger.info("=" * 60)
-    logger.info(f"Elastic Net CV AUC: {en_results['mean_score']:.4f} (+/- {en_results['std_score']:.4f})")
-    logger.info(f"Random Forest CV AUC: {rf_results['mean_score']:.4f} (+/- {rf_results['std_score']:.4f})")
-    logger.info(f"Best Model: {best_model_name}")
+    logger.info(
+        f"Elastic Net CV AUC: {en_results['mean_score']:.4f} "
+        f"(+/- {en_results['std_score']:.4f})"
+    )
+    logger.info(
+        f"Random Forest CV AUC: {rf_results['mean_score']:.4f} "
+        f"(+/- {rf_results['std_score']:.4f})"
+    )
+    if linear_score_results:
+        for key, res in linear_score_results.items():
+            logger.info(
+                f"{res['model_name']} CV AUC: {res['mean_score']:.4f} "
+                f"(+/- {res['std_score']:.4f})"
+            )
+    logger.info(f"Best ML Model (Elastic Net vs RF): {best_model_name}")
     logger.info("=" * 60)
     
     # Save models with imputation strategy in filename
@@ -479,6 +752,7 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     results = {
         'elastic_net': en_results,
         'random_forest': rf_results,
+        'linear_scores': linear_score_results,
         'best_model_name': best_model_name,
         'imputation_strategy': imputation_strategy
     }

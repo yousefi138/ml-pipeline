@@ -882,6 +882,10 @@ class ConsolidatedReportGenerator:
                 'strategy_name': {
                     'elastic_net': {...},
                     'random_forest': {...},
+                    'linear_scores': {       # optional
+                        'score_id': {...},
+                        ...
+                    },
                     'best_model_name': ...,
                     'imputation_strategy': ...
                 },
@@ -906,6 +910,7 @@ class ConsolidatedReportGenerator:
         for strategy, results in self.all_results.items():
             en_results = results['elastic_net']
             rf_results = results['random_forest']
+            linear_scores = results.get('linear_scores', {}) or {}
             
             # Elastic Net row
             comparison_data.append({
@@ -930,6 +935,20 @@ class ConsolidatedReportGenerator:
                 'Best Hyperparameters': str(rf_results['best_params']),
                 'Best Overall': '⭐' if results['best_model_name'] == 'Random Forest' else ''
             })
+
+            # Any additional predefined linear score models
+            for score_key, score_res in linear_scores.items():
+                model_label = score_res.get('model_name', f"Score: {score_key}")
+                comparison_data.append({
+                    'Imputation Strategy': strategy.upper(),
+                    'Model': model_label,
+                    'Mean CV AUC': score_res['mean_score'],
+                    'Std CV AUC': score_res['std_score'],
+                    'Min CV AUC': score_res['cv_scores'].min(),
+                    'Max CV AUC': score_res['cv_scores'].max(),
+                    'Best Hyperparameters': 'N/A',
+                    'Best Overall': ''
+                })
         
         comparison_df = pd.DataFrame(comparison_data)
         return comparison_df
@@ -977,7 +996,7 @@ class ConsolidatedReportGenerator:
         
         # Add all results with comparison metadata
         for strategy, results in self.all_results.items():
-            consolidated_json['results'][strategy] = {
+            strategy_entry = {
                 'elastic_net': {
                     'mean_auc': float(results['elastic_net']['mean_score']),
                     'std_auc': float(results['elastic_net']['std_score']),
@@ -992,6 +1011,20 @@ class ConsolidatedReportGenerator:
                 },
                 'best_model': results['best_model_name']
             }
+
+            # Optional predefined linear scores
+            linear_scores = results.get('linear_scores', {}) or {}
+            if linear_scores:
+                strategy_entry['linear_scores'] = {}
+                for score_key, score_res in linear_scores.items():
+                    strategy_entry['linear_scores'][score_key] = {
+                        'model_name': score_res.get('model_name', f"Score: {score_key}"),
+                        'mean_auc': float(score_res['mean_score']),
+                        'std_auc': float(score_res['std_score']),
+                        'cv_scores': score_res['cv_scores'].tolist()
+                    }
+
+            consolidated_json['results'][strategy] = strategy_entry
         
         filepath = f"{REPORTS_DIR}/{filename}"
         with open(filepath, 'w') as f:

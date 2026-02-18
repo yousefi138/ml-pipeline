@@ -45,3 +45,13 @@ Goal: I want the pipeline to be more generalizable and to not rely on names of s
 
 Specifically, can you:
 * Update the pipeline so that the only specific feature names that need to be defined are 'TARGET_COLUMN' and 'TIME_COLUMN' in the `config.py` file? Otherwise, the script should consider all other features supplied in the 'DATA_FILE' as potential predictive features, without calling on their specific names
+
+## 
+Goal: I want to be able to benchmark the performance of the prediction methods in my pipeline against previously developed linear prediction scores by applying these scores within the existing cross-validation framework in order to get a like for like comparison of prediction performance.
+
+Currently, I have 1 such score available in the `data/` dir in `score.csv`. However, I expect to add more, so please build in easy scalability to more scores added in future.
+
+I need the pipeline:
+* to import defined score.csv file(s)
+* apply the coefficient weights to the input data within the existing imputation and cross-validation framework 
+* add the score prediction methods implemented to the combined evalution outcome reporting

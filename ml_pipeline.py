@@ -285,7 +285,16 @@ def format_strategy_results(all_results):
         lines.append(f"\n        {strategy.upper()} IMPUTATION")
         lines.append(f"          • Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
         lines.append(f"          • Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
-        lines.append(f"          • Best Model: {results['best_model_name']}")
+        # Any predefined linear scores evaluated under this strategy
+        linear_scores = results.get('linear_scores', {}) or {}
+        if linear_scores:
+            lines.append("          • Predefined Linear Scores:")
+            for key, res in linear_scores.items():
+                lines.append(
+                    f"            - {res['model_name']}: CV AUC "
+                    f"{res['mean_score']:.4f} (+/- {res['std_score']:.4f})"
+                )
+        lines.append(f"          • Best ML Model (Elastic Net vs RF): {results['best_model_name']}")
     return "\n".join(lines)
 
 
