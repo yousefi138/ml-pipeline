@@ -17,7 +17,7 @@ from config import (
 )
 from data_prep import prepare_pipeline_data
 from model_training import run_full_pipeline
-from evaluation import generate_full_evaluation_report
+from evaluation import generate_full_evaluation_report, ConsolidatedReportGenerator
 from imputation import MissingnessAnalyzer
 from utils import setup_logging
 
@@ -98,20 +98,27 @@ def main():
             logger.info(f"  - Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
             logger.info(f"  - Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
         
-        # ====== STEP 3: EVALUATION AND REPORTING ======
-        print_header("Step 3: Evaluation and Comprehensive Reporting")
-        logger.info("Generating evaluation reports and visualizations for each strategy...")
+        # ====== STEP 3: EVALUATION AND CONSOLIDATED REPORTING ======
+        print_header("Step 3: Evaluation and Consolidated Reporting")
+        logger.info("Generating consolidated evaluation report across all strategies...")
         
+        # Generate unified consolidated reports for all strategy-model combinations
+        consolidated_reporter = ConsolidatedReportGenerator(all_results)
+        report_paths = consolidated_reporter.generate_all_reports()
+        
+        logger.info(f"✓ Consolidated reports generated successfully")
+        logger.info(f"  - HTML Report: {report_paths['html']}")
+        logger.info(f"  - JSON Report: {report_paths['json']}")
+        logger.info(f"  - CSV Report:  {report_paths['csv']}")
+        
+        # Also generate per-strategy reports for detailed analysis
+        logger.info("\nGenerating detailed per-strategy reports...")
         for strategy, results in all_results.items():
-            logger.info(f"\nGenerating reports for {strategy.upper()} imputation...")
+            logger.info(f"  - Generating detailed reports for {strategy.upper()} imputation...")
             generate_full_evaluation_report(results)
         
-        logger.info(f"✓ Evaluation completed for all strategies")
-        logger.info(f"  - Reports saved to: {REPORTS_DIR}/")
-        logger.info(f"  - Models saved to: {MODELS_DIR}/")
-        
-        # ====== STEP 4: IMPUTATION STRATEGY COMPARISON ======
-        print_header("Step 4: Imputation Strategy Comparison")
+        # ====== STEP 4: STRATEGY COMPARISON SUMMARY ======
+        print_header("Step 4: Strategy Comparison Summary")
         logger.info("Comparing performance across imputation strategies...")
         
         strategy_comparison_df = pd.DataFrame(strategy_summary)
@@ -124,7 +131,7 @@ def main():
         logger.info(f"\nStrategy comparison saved to {strategy_comparison_path}")
         
         # ====== PIPELINE SUMMARY ======
-        print_header("Pipeline Summary: Missingness Imputation Analysis")
+        print_header("Pipeline Summary: Missingness Imputation Analysis with Consolidated Reporting")
         
         summary_text = f"""
         ML Pipeline Execution Summary: Robust Missingness Handling
@@ -149,17 +156,23 @@ def main():
         {strategy_comparison_df.to_string(index=False)}
         
         OUTPUTS
-          • Reports: {REPORTS_DIR}/
-            - Per-strategy HTML, JSON, and CSV reports
-            - Overall strategy comparison CSV
+          • Consolidated Reports: {REPORTS_DIR}/
+            - consolidated_results.html (Single unified report of all combinations)
+            - consolidated_results.json (Detailed metadata in JSON)
+            - consolidated_results.csv (Tabular summary)
+          • Per-Strategy Detail Reports: {REPORTS_DIR}/
+            - model_evaluation_report_*.html, *.json, *.csv (One set per strategy)
+            - CV scores and model comparison plots
+          • Strategy Comparison: {REPORTS_DIR}/imputation_strategy_comparison.csv
           • Models: {MODELS_DIR}/
             - Best models for each imputation strategy
-          • Visualizations: CV scores and model comparison plots for each strategy
         
         KEY INSIGHTS
           • Multiple imputation strategies tested: {', '.join(s.upper() for s in imputation_strategies)}
-          • Best overall model selection: Based on cross-validation AUC
-          • Data leakage prevention: Imputation fitted only on training folds
+          • Consolidated reporting: All strategy-model combinations in single unified HTML report
+          • Best overall model selection: Based on cross-validation AUC across all combinations
+          • Data leakage prevention: Imputation fitted only on training folds within nested CV
+          • Per-strategy details: Additional detailed reports generated for deeper analysis
         
         ──────────────────────────────────────────────────────────────
         """

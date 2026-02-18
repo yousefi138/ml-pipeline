@@ -864,6 +864,504 @@ def generate_full_evaluation_report(model_results):
     logger.info("=" * 80)
 
 
+class ConsolidatedReportGenerator:
+    """
+    Generate consolidated reports across all imputation strategies and models.
+    Combines results from multiple strategy-model combinations into unified reports.
+    """
+    
+    def __init__(self, all_results_dict):
+        """
+        Initialize with results from all imputation strategies.
+        
+        Parameters
+        ----------
+        all_results_dict : dict
+            Dictionary with structure:
+            {
+                'strategy_name': {
+                    'elastic_net': {...},
+                    'random_forest': {...},
+                    'best_model_name': ...,
+                    'imputation_strategy': ...
+                },
+                ...
+            }
+        """
+        self.all_results = all_results_dict
+        self.strategies = list(all_results_dict.keys())
+        logger.info(f"Initialized ConsolidatedReportGenerator for {len(self.strategies)} strategies")
+    
+    def create_comparison_dataframe(self):
+        """
+        Create a comprehensive comparison DataFrame across all strategies and models.
+        
+        Returns
+        -------
+        comparison_df : pd.DataFrame
+            DataFrame with all results
+        """
+        comparison_data = []
+        
+        for strategy, results in self.all_results.items():
+            en_results = results['elastic_net']
+            rf_results = results['random_forest']
+            
+            # Elastic Net row
+            comparison_data.append({
+                'Imputation Strategy': strategy.upper(),
+                'Model': 'Elastic Net',
+                'Mean CV AUC': en_results['mean_score'],
+                'Std CV AUC': en_results['std_score'],
+                'Min CV AUC': en_results['cv_scores'].min(),
+                'Max CV AUC': en_results['cv_scores'].max(),
+                'Best Hyperparameters': str(en_results['best_params']),
+                'Best Overall': '⭐' if results['best_model_name'] == 'Elastic Net' else ''
+            })
+            
+            # Random Forest row
+            comparison_data.append({
+                'Imputation Strategy': strategy.upper(),
+                'Model': 'Random Forest',
+                'Mean CV AUC': rf_results['mean_score'],
+                'Std CV AUC': rf_results['std_score'],
+                'Min CV AUC': rf_results['cv_scores'].min(),
+                'Max CV AUC': rf_results['cv_scores'].max(),
+                'Best Hyperparameters': str(rf_results['best_params']),
+                'Best Overall': '⭐' if results['best_model_name'] == 'Random Forest' else ''
+            })
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        return comparison_df
+    
+    def save_consolidated_csv(self, filename='consolidated_results.csv'):
+        """
+        Save consolidated comparison to CSV.
+        
+        Parameters
+        ----------
+        filename : str
+            Output filename
+        
+        Returns
+        -------
+        filepath : str
+            Path to saved file
+        """
+        comparison_df = self.create_comparison_dataframe()
+        filepath = f"{REPORTS_DIR}/{filename}"
+        comparison_df.to_csv(filepath, index=False)
+        logger.info(f"Consolidated CSV saved to {filepath}")
+        return filepath
+    
+    def save_consolidated_json(self, filename='consolidated_results.json'):
+        """
+        Save all results in consolidated JSON format.
+        
+        Parameters
+        ----------
+        filename : str
+            Output filename
+        
+        Returns
+        -------
+        filepath : str
+            Path to saved file
+        """
+        consolidated_json = {
+            'timestamp': datetime.now().isoformat(),
+            'num_strategies': len(self.strategies),
+            'strategies': self.strategies,
+            'results': {}
+        }
+        
+        # Add all results with comparison metadata
+        for strategy, results in self.all_results.items():
+            consolidated_json['results'][strategy] = {
+                'elastic_net': {
+                    'mean_auc': float(results['elastic_net']['mean_score']),
+                    'std_auc': float(results['elastic_net']['std_score']),
+                    'best_params': results['elastic_net']['best_params'],
+                    'cv_scores': results['elastic_net']['cv_scores'].tolist()
+                },
+                'random_forest': {
+                    'mean_auc': float(results['random_forest']['mean_score']),
+                    'std_auc': float(results['random_forest']['std_score']),
+                    'best_params': results['random_forest']['best_params'],
+                    'cv_scores': results['random_forest']['cv_scores'].tolist()
+                },
+                'best_model': results['best_model_name']
+            }
+        
+        filepath = f"{REPORTS_DIR}/{filename}"
+        with open(filepath, 'w') as f:
+            json.dump(consolidated_json, f, indent=2)
+        
+        logger.info(f"Consolidated JSON saved to {filepath}")
+        return filepath
+    
+    def generate_consolidated_html_report(self, filename='consolidated_results.html'):
+        """
+        Generate comprehensive HTML report comparing all strategies and models.
+        """
+        comparison_df = self.create_comparison_dataframe()
+        timestamp = datetime.now().isoformat()
+        
+        # Build results table HTML
+        results_table_html = comparison_df.to_html(index=False, border=0, 
+                                                   classes='results-table', 
+                                                   escape=False)
+        
+        # Find best overall model
+        best_idx = comparison_df['Mean CV AUC'].idxmax()
+        best_strategy = comparison_df.loc[best_idx, 'Imputation Strategy']
+        best_model = comparison_df.loc[best_idx, 'Model']
+        best_auc = comparison_df.loc[best_idx, 'Mean CV AUC']
+        best_std = comparison_df.loc[best_idx, 'Std CV AUC']
+        
+        # Build strategy summary HTML
+        strategy_summary_html = ""
+        for strategy in self.strategies:
+            en_auc = self.all_results[strategy]['elastic_net']['mean_score']
+            rf_auc = self.all_results[strategy]['random_forest']['mean_score']
+            best = self.all_results[strategy]['best_model_name']
+            
+            strategy_summary_html += f"""
+            <tr>
+                <td><strong>{strategy.upper()}</strong></td>
+                <td>{en_auc:.4f}</td>
+                <td>{rf_auc:.4f}</td>
+                <td>{best}</td>
+            </tr>
+            """
+        
+        # Build strategy cards HTML
+        strategy_cards_html = ""
+        for strategy in self.strategies:
+            en_auc = self.all_results[strategy]['elastic_net']['mean_score']
+            en_std = self.all_results[strategy]['elastic_net']['std_score']
+            rf_auc = self.all_results[strategy]['random_forest']['mean_score']
+            rf_std = self.all_results[strategy]['random_forest']['std_score']
+            best = self.all_results[strategy]['best_model_name']
+            
+            strategy_cards_html += f"""
+                <div class="strategy-card">
+                    <h4>{strategy.upper()} Imputation</h4>
+                    <div class="metric-row">
+                        <span class="metric-label">Elastic Net AUC:</span>
+                        <span class="metric-value">{en_auc:.4f} ± {en_std:.4f}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Random Forest AUC:</span>
+                        <span class="metric-value">{rf_auc:.4f} ± {rf_std:.4f}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Best Model:</span>
+                        <span class="metric-value">{best}</span>
+                    </div>
+                </div>
+            """
+        
+        html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consolidated Model Evaluation Report</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            padding: 20px;
+            min-height: 100vh;
+        }}
+        
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }}
+        
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }}
+        
+        .header h1 {{
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }}
+        
+        .header p {{
+            font-size: 1.1em;
+            opacity: 0.9;
+        }}
+        
+        .content {{
+            padding: 40px;
+        }}
+        
+        .info-box {{
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin-bottom: 30px;
+            border-radius: 5px;
+        }}
+        
+        .best-badge {{
+            display: inline-block;
+            background: #28a745;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-left: 10px;
+        }}
+        
+        h2 {{
+            color: #667eea;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }}
+        
+        h3 {{
+            color: #555;
+            margin-top: 25px;
+            margin-bottom: 15px;
+        }}
+        
+        .results-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }}
+        
+        .results-table thead {{
+            background: #667eea;
+            color: white;
+            font-weight: bold;
+        }}
+        
+        .results-table th {{
+            padding: 15px;
+            text-align: left;
+            border-bottom: 2px solid #667eea;
+        }}
+        
+        .results-table td {{
+            padding: 12px 15px;
+            border-bottom: 1px solid #ddd;
+        }}
+        
+        .results-table tbody tr:hover {{
+            background: #f5f5f5;
+        }}
+        
+        .results-table tbody tr:nth-child(even) {{
+            background: #fafafa;
+        }}
+        
+        .strategy-comparison {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }}
+        
+        .strategy-card {{
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+        }}
+        
+        .strategy-card h4 {{
+            color: #667eea;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }}
+        
+        .metric-row {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            padding: 8px 0;
+        }}
+        
+        .metric-label {{
+            font-weight: bold;
+            color: #555;
+        }}
+        
+        .metric-value {{
+            color: #667eea;
+            font-weight: bold;
+        }}
+        
+        .footer {{
+            background: #f8f9fa;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            border-top: 1px solid #ddd;
+            font-size: 0.9em;
+        }}
+        
+        @media (max-width: 768px) {{
+            .header {{
+                padding: 20px;
+            }}
+            
+            .header h1 {{
+                font-size: 1.8em;
+            }}
+            
+            .content {{
+                padding: 20px;
+            }}
+            
+            .strategy-comparison {{
+                grid-template-columns: 1fr;
+            }}
+            
+            .results-table {{
+                font-size: 0.9em;
+            }}
+            
+            .results-table th, .results-table td {{
+                padding: 8px;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Consolidated Model Evaluation Report</h1>
+            <p>Multi-Strategy Pipeline Performance Analysis</p>
+        </div>
+        
+        <div class="content">
+            <!-- Report Metadata -->
+            <div class="info-box">
+                <strong>Report Generated:</strong> {timestamp}<br>
+                <strong>Number of Strategies Evaluated:</strong> {len(self.strategies)}<br>
+                <strong>Best Overall Model:</strong> {best_strategy} + {best_model} 
+                <span class="best-badge">Mean AUC: {best_auc:.4f} ± {best_std:.4f}</span>
+            </div>
+            
+            <!-- Key Metrics Summary -->
+            <h2>📈 Performance Summary by Strategy</h2>
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px;">
+                <thead style="background: #667eea; color: white;">
+                    <tr>
+                        <th style="padding: 12px; text-align: left;">Imputation Strategy</th>
+                        <th style="padding: 12px; text-align: center;">Elastic Net AUC</th>
+                        <th style="padding: 12px; text-align: center;">Random Forest AUC</th>
+                        <th style="padding: 12px; text-align: center;">Best Model</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {strategy_summary_html}
+                </tbody>
+            </table>
+            
+            <!-- Detailed Results Table -->
+            <h2>🔍 Detailed Results: All Combinations</h2>
+            {results_table_html}
+            
+            <!-- Strategy Comparison Cards -->
+            <h2>📋 Strategy-wise Breakdown</h2>
+            <div class="strategy-comparison">
+                {strategy_cards_html}
+            </div>
+            
+            <!-- Interpretation Guide -->
+            <h2>💡 How to Interpret Results</h2>
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+                <h3 style="margin-top: 0;">Mean CV AUC</h3>
+                <p>Average Area Under the Curve across all cross-validation folds. Higher is better (range: 0-1).</p>
+                
+                <h3>Std CV AUC</h3>
+                <p>Standard deviation of CV AUC scores. Lower is better, indicating more stable performance across folds.</p>
+                
+                <h3>Imputation Strategy Comparison</h3>
+                <ul style="margin-left: 20px;">
+                    <li><strong>Median Imputation:</strong> Fast, simple approach. Replaces missing numeric values with median; categorical with most frequent.</li>
+                    <li><strong>KNN Imputation:</strong> More sophisticated. Uses k-nearest neighbors for numeric features; most frequent for categorical.</li>
+                </ul>
+                
+                <h3>Model Selection</h3>
+                <p>The best overall model combines the optimal imputation strategy with the best-performing algorithm at that strategy level.</p>
+            </div>
+            
+            <!-- Data Leakage Prevention -->
+            <h2>✅ Quality Assurance</h2>
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px;">
+                <p><strong>No Data Leakage:</strong> All imputation statistics were learned only from training folds within nested cross-validation loops.</p>
+                <p><strong>Fair Comparison:</strong> All models evaluated using the same nested CV framework (5 outer folds, 5 inner folds).</p>
+                <p><strong>Stratified Split:</strong> Class distribution preserved across all CV folds.</p>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Generated on {timestamp}</p>
+            <p>ML Pipeline with Robust Imputation Strategies</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        filepath = f"{REPORTS_DIR}/{filename}"
+        with open(filepath, 'w') as f:
+            f.write(html_content)
+        
+        logger.info(f"Consolidated HTML report saved to {filepath}")
+        return filepath
+    
+    def generate_all_reports(self):
+        """Generate all consolidated reports (CSV, JSON, HTML)."""
+        logger.info("\n" + "=" * 80)
+        logger.info("GENERATING CONSOLIDATED REPORTS")
+        logger.info("=" * 80)
+        
+        csv_path = self.save_consolidated_csv()
+        json_path = self.save_consolidated_json()
+        html_path = self.generate_consolidated_html_report()
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("CONSOLIDATED REPORTS COMPLETE")
+        logger.info("=" * 80)
+        logger.info(f"CSV Report:  {csv_path}")
+        logger.info(f"JSON Report: {json_path}")
+        logger.info(f"HTML Report: {html_path}")
+        logger.info("=" * 80)
+        
+        return {
+            'csv': csv_path,
+            'json': json_path,
+            'html': html_path
+        }
+
+
 if __name__ == '__main__':
     from model_training import run_full_pipeline
     from data_prep import prepare_pipeline_data

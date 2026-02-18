@@ -15,7 +15,7 @@ PROJECT_PATH = config['default']['project']
 
 # Data paths
 DATA_DIR = os.path.join(PROJECT_PATH, 'data')
-DATA_FILE = os.path.join(DATA_DIR, 'breast_cancer_survival.csv')
+DATA_FILE = os.path.join(DATA_DIR, 'breast_cancer_survival_with_missingness.csv')
 
 # Results paths
 RESULTS_DIR = os.path.join(PROJECT_PATH, 'results')
