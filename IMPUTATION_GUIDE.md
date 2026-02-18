@@ -28,9 +28,14 @@ statistics are learned only from training data in each fold.
 - **Class**: `KNNImputationTransformer`
 - **Strategy**: Imputes missing values using the k nearest neighbors
 - **Configuration**:
-  - `n_neighbors`: Number of neighbors to use (default: 5)
-  - `weights`: 'distance' (weighted by distance) or 'uniform'
-  - `metric`: Distance metric, 'nan_euclidean' recommended for missing values
+  - `n_neighbors`: Number of neighbors to use (default: 20)
+  - `weights`: Supports `'uniform'`, `'distance'`, or `'gaussian'`
+    - Default is `'gaussian'`, which applies a Gaussian distance kernel via a
+      callable `gaussian_kernel` passed to `sklearn.impute.KNNImputer`.
+    - The kernel uses the median of the non-zero distances in each call as the
+      bandwidth (sigma), providing an adaptive, scale-robust weighting of
+      neighbors.
+  - `metric`: Distance metric, `'nan_euclidean'` recommended for missing values
 - **Use Case**: Preserves local data structure and relationships
 - **Advantages**:
   - Captures relationships between features

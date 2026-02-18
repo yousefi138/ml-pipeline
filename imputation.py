@@ -13,6 +13,32 @@ from utils import setup_logging
 logger = setup_logging('imputation')
 
 
+def gaussian_kernel(distances):
+    """Gaussian distance kernel for KNN weights.
+
+    This is used as a callable ``weights`` function for ``KNNImputer``.
+    The bandwidth (sigma) is chosen adaptively as the median of non-zero
+    distances in the current distance array, providing scale-robust
+    behaviour without extra configuration.
+    """
+    d = np.asarray(distances, dtype=float)
+
+    # Handle the degenerate case where all distances are zero or NaN
+    nonzero = d[np.logical_and(np.isfinite(d), d > 0)]
+    if nonzero.size == 0:
+        return np.ones_like(d)
+
+    sigma = np.median(nonzero)
+    # Gaussian kernel: exp(-0.5 * (d / sigma)^2)
+    w = np.exp(-0.5 * (d / sigma) ** 2)
+
+    # If numerical underflow produced all zeros, fall back to uniform
+    if np.all(w == 0):
+        return np.ones_like(d)
+
+    return w
+
+
 class MissingnessAnalyzer:
     """
     Analyze missing data patterns in the dataset.
@@ -181,25 +207,34 @@ class KNNImputationTransformer(BaseEstimator, TransformerMixin):
     Ensures robustness to mixed data types during cross-validation.
     """
     
-    def __init__(self, n_neighbors=5, weights='distance', metric='nan_euclidean'):
+    def __init__(self, n_neighbors=20, weights='gaussian', metric='nan_euclidean'):
         """
         Initialize KNN imputation transformer.
         
         Parameters
         ----------
         n_neighbors : int
-            Number of nearest neighbors to use (default 5)
-        weights : str
-            Weight function ('uniform' or 'distance', default 'distance')
+            Number of nearest neighbors to use (default 20)
+        weights : str or callable
+            Weight function. Supported strings are 'uniform', 'distance',
+            and 'gaussian' (Gaussian distance kernel). If a callable is
+            provided, it must take an array of distances and return an
+            array of weights of the same shape.
         metric : str
             Distance metric ('nan_euclidean' recommended for missing values)
         """
         self.n_neighbors = n_neighbors
         self.weights = weights
         self.metric = metric
+
+        # Map our custom string identifier to a callable Gaussian kernel
+        if isinstance(weights, str) and weights == 'gaussian':
+            knn_weights = gaussian_kernel
+        else:
+            knn_weights = weights
         self.knn_imputer = KNNImputer(
             n_neighbors=n_neighbors,
-            weights=weights,
+            weights=knn_weights,
             metric=metric
         )
         self.categorical_imputer = SimpleImputer(strategy='most_frequent')
@@ -296,8 +331,9 @@ def get_imputation_transformer(strategy='median', **kwargs):
     if strategy == 'median':
         return MedianImputationTransformer()
     elif strategy == 'knn':
-        n_neighbors = kwargs.get('n_neighbors', 5)
-        weights = kwargs.get('weights', 'distance')
+        n_neighbors = kwargs.get('n_neighbors', 20)
+        # Default to Gaussian distance kernel for KNN imputation
+        weights = kwargs.get('weights', 'gaussian')
         metric = kwargs.get('metric', 'nan_euclidean')
         return KNNImputationTransformer(
             n_neighbors=n_neighbors,
