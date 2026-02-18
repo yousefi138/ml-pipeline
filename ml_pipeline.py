@@ -14,8 +14,9 @@ from datetime import datetime
 # Set seed for reproducibility
 np.random.seed(42)
 
+import config
 from config import (
-    RANDOM_SEED, PROJECT_PATH, DATA_FILE, RESULTS_DIR, MODELS_DIR, REPORTS_DIR
+    RANDOM_SEED, PROJECT_PATH, DATA_FILE, DATA_DIR, RESULTS_DIR, MODELS_DIR, REPORTS_DIR
 )
 from data_prep import prepare_pipeline_data
 from model_training import run_full_pipeline
@@ -47,6 +48,7 @@ Examples:
   python ml_pipeline.py
   python ml_pipeline.py --dataset breast_cancer_survival.csv
   python ml_pipeline.py --dataset /full/path/to/breast_cancer_survival.csv
+  python ml_pipeline.py --dataset flchain_survival.csv --target-column death --time-column futime
         '''
     )
     parser.add_argument(
@@ -56,15 +58,41 @@ Examples:
         help='Path to the input dataset (CSV file). If not provided, uses default from config. '
              'Can be a filename (assumed to be in data/ directory) or full path.'
     )
+    parser.add_argument(
+        '--target-column',
+        type=str,
+        default=None,
+        help='Name of the target column in the dataset. If not provided, uses default from config.'
+    )
+    parser.add_argument(
+        '--time-column',
+        type=str,
+        default=None,
+        help='Name of the time column in the dataset. If not provided, uses default from config.'
+    )
     
     args = parser.parse_args()
+    
+    # Update config with command line arguments if provided
+    if args.target_column:
+        config.TARGET_COLUMN = args.target_column
+        logger.info(f"Using target column from command line: {args.target_column}")
+    
+    if args.time_column:
+        config.TIME_COLUMN = args.time_column
+        logger.info(f"Using time column from command line: {args.time_column}")
+    
+    # Also update in utils module since it imports these from config
+    import utils
+    utils.TARGET_COLUMN = config.TARGET_COLUMN
+    utils.TIME_COLUMN = config.TIME_COLUMN
     
     # Determine the dataset path to use
     if args.dataset:
         dataset_path = args.dataset
         # If it's just a filename (no path separators), assume it's in the data directory
         if os.sep not in dataset_path and '/' not in dataset_path:
-            dataset_path = os.path.join(os.path.dirname(PROJECT_PATH), 'data', dataset_path)
+            dataset_path = os.path.join(DATA_DIR, dataset_path)
     else:
         dataset_path = DATA_FILE
     
@@ -77,13 +105,19 @@ Examples:
     logger.info(f"Pipeline started at {datetime.now().isoformat()}")
     logger.info(f"Project path: {PROJECT_PATH}")
     logger.info(f"Data file: {dataset_path}")
+    logger.info(f"Target column: {config.TARGET_COLUMN}")
+    logger.info(f"Time column: {config.TIME_COLUMN}")
     
     try:
         # ====== STEP 1: DATA PREPARATION ======
         print_header("Step 1: Data Loading and Preparation")
         logger.info("Initiating data preparation...")
         
-        data = prepare_pipeline_data(dataset_path)
+        data = prepare_pipeline_data(
+            dataset_path,
+            target_column=config.TARGET_COLUMN,
+            time_column=config.TIME_COLUMN
+        )
         X = data['X']
         y = data['y']
         

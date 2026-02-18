@@ -211,11 +211,11 @@ def assess_class_imbalance(y, threshold=0.3):
     return report
 
 
-def get_feature_groups(df):
+def get_feature_groups(df, target_column=None, time_column=None):
     """
     Extract all predictive features from the dataframe.
     
-    Automatically excludes TARGET_COLUMN and TIME_COLUMN to get all features
+    Automatically excludes target and time columns to get all features
     available for model training. This function is feature-agnostic and does not
     require predefined feature group definitions.
     
@@ -223,14 +223,24 @@ def get_feature_groups(df):
     ----------
     df : pd.DataFrame
         Input dataframe
+    target_column : str, optional
+        Name of the target column. If None, uses config.TARGET_COLUMN
+    time_column : str, optional
+        Name of the time column. If None, uses config.TIME_COLUMN
     
     Returns
     -------
     feature_groups : dict
         Dictionary with 'all_features' containing all predictive features
     """
+    # Use config values if not provided
+    if target_column is None:
+        target_column = TARGET_COLUMN
+    if time_column is None:
+        time_column = TIME_COLUMN
+    
     # Exclude target and time columns from features
-    exclude_cols = {TARGET_COLUMN, TIME_COLUMN}
+    exclude_cols = {target_column, time_column}
     all_features = [col for col in df.columns if col not in exclude_cols]
     
     feature_groups = {

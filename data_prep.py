@@ -126,7 +126,7 @@ def validate_data(df, target_column=TARGET_COLUMN):
     return validation_report
 
 
-def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True, encode_categorical=True):
+def preprocess_features(df, target_column=TARGET_COLUMN, time_column=TIME_COLUMN, scale_features=True, encode_categorical=True):
     """Preprocess features by separating target and features and optionally
     encoding categorical variables and scaling continuous features.
 
@@ -169,12 +169,12 @@ def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True, en
     
     # Separate target and features
     y = df[target_column].copy()
-    X = df.drop(columns=[target_column, TIME_COLUMN], errors='ignore').copy()
+    X = df.drop(columns=[target_column, time_column], errors='ignore').copy()
     
     logger.info(f"Features shape before preprocessing: {X.shape}")
     
     # Get feature groups
-    feature_groups = get_feature_groups(X)
+    feature_groups = get_feature_groups(X, target_column=target_column, time_column=time_column)
     logger.info(f"Predictive features: {len(feature_groups['all_features'])}")
     
     encoders = None
@@ -205,7 +205,7 @@ def preprocess_features(df, target_column=TARGET_COLUMN, scale_features=True, en
     return X, y, feature_groups, encoders, scaler
 
 
-def prepare_pipeline_data(filepath=DATA_FILE):
+def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=None):
     """
     Complete data preparation pipeline: load, validate, and preprocess.
     
@@ -213,12 +213,22 @@ def prepare_pipeline_data(filepath=DATA_FILE):
     ----------
     filepath : str
         Path to the data file
+    target_column : str, optional
+        Name of the target column. If None, uses config.TARGET_COLUMN
+    time_column : str, optional
+        Name of the time column. If None, uses config.TIME_COLUMN
     
     Returns
     -------
     results : dict
         Dictionary containing X, y, metadata, and preprocessing objects
     """
+    # Use config values if not provided
+    if target_column is None:
+        target_column = TARGET_COLUMN
+    if time_column is None:
+        time_column = TIME_COLUMN
+    
     logger.info("Starting data preparation pipeline...")
     
     # Load data
@@ -228,7 +238,7 @@ def prepare_pipeline_data(filepath=DATA_FILE):
     exploration = explore_data(df)
     
     # Validate data
-    validation_report = validate_data(df)
+    validation_report = validate_data(df, target_column=target_column)
     
     # Preprocess features
     # NOTE: For the main training pipeline, we disable encoding and scaling
@@ -237,6 +247,8 @@ def prepare_pipeline_data(filepath=DATA_FILE):
     # data leakage from fitting transformers on the full dataset.
     X, y, feature_groups, encoders, scaler = preprocess_features(
         df,
+        target_column=target_column,
+        time_column=time_column,
         scale_features=False,
         encode_categorical=False
     )
@@ -250,7 +262,7 @@ def prepare_pipeline_data(filepath=DATA_FILE):
         'feature_groups': feature_groups,
         'encoders': encoders,
         'scaler': scaler,
-        'target_column': TARGET_COLUMN,
+        'target_column': target_column,
         'n_samples': X.shape[0],
         'n_features': X.shape[1]
     }
