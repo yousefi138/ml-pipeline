@@ -534,6 +534,8 @@ def _load_predefined_scores():
     for path in files:
         try:
             df = pd.read_csv(path)
+            # Strip whitespace from column names to handle formatting issues
+            df.columns = df.columns.str.strip()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"Could not read score file {path}: {exc}")
             continue
@@ -550,7 +552,7 @@ def _load_predefined_scores():
         coefficients = {}
         intercept = 0.0
         for _, row in df.iterrows():
-            var_name = str(row['var'])
+            var_name = str(row['var']).strip()
             coef_val = float(row['coef'])
             lower = var_name.lower()
             if lower in {'intercept', '(intercept)', 'const'}:

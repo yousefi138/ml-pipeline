@@ -1052,46 +1052,84 @@ class ConsolidatedReportGenerator:
         best_auc = comparison_df.loc[best_idx, 'Mean CV AUC']
         best_std = comparison_df.loc[best_idx, 'Std CV AUC']
         
-        # Build strategy summary HTML
+        # Build strategy summary HTML dynamically including all models
         strategy_summary_html = ""
         for strategy in self.strategies:
-            en_auc = self.all_results[strategy]['elastic_net']['mean_score']
-            rf_auc = self.all_results[strategy]['random_forest']['mean_score']
-            best = self.all_results[strategy]['best_model_name']
+            strategy_data = self.all_results[strategy]
+            en_auc = strategy_data['elastic_net']['mean_score']
+            en_std = strategy_data['elastic_net']['std_score']
+            rf_auc = strategy_data['random_forest']['mean_score']
+            rf_std = strategy_data['random_forest']['std_score']
             
             strategy_summary_html += f"""
-            <tr>
+            <tr class="strategy-header">
                 <td><strong>{strategy.upper()}</strong></td>
-                <td>{en_auc:.4f}</td>
-                <td>{rf_auc:.4f}</td>
-                <td>{best}</td>
+                <td></td>
+                <td></td>
+            </tr>
+            <tr>
+                <td></td>
+                <td>Elastic Net</td>
+                <td style="text-align: center;">{en_auc:.4f} ± {en_std:.4f}</td>
+            </tr>
+            <tr>
+                <td></td>
+                <td>Random Forest</td>
+                <td style="text-align: center;">{rf_auc:.4f} ± {rf_std:.4f}</td>
+            </tr>
+            """
+            
+            # Add rows for any predefined linear scores
+            linear_scores = strategy_data.get('linear_scores', {}) or {}
+            for score_key, score_res in linear_scores.items():
+                model_label = score_res.get('model_name', f"Score: {score_key}")
+                score_auc = score_res['mean_score']
+                score_std = score_res['std_score']
+                strategy_summary_html += f"""
+            <tr>
+                <td></td>
+                <td>{model_label}</td>
+                <td style="text-align: center;">{score_auc:.4f} ± {score_std:.4f}</td>
             </tr>
             """
         
-        # Build strategy cards HTML
+        # Build strategy cards HTML dynamically including all models
         strategy_cards_html = ""
         for strategy in self.strategies:
-            en_auc = self.all_results[strategy]['elastic_net']['mean_score']
-            en_std = self.all_results[strategy]['elastic_net']['std_score']
-            rf_auc = self.all_results[strategy]['random_forest']['mean_score']
-            rf_std = self.all_results[strategy]['random_forest']['std_score']
-            best = self.all_results[strategy]['best_model_name']
+            strategy_data = self.all_results[strategy]
+            en_auc = strategy_data['elastic_net']['mean_score']
+            en_std = strategy_data['elastic_net']['std_score']
+            rf_auc = strategy_data['random_forest']['mean_score']
+            rf_std = strategy_data['random_forest']['std_score']
+            
+            card_content = f"""
+                    <div class="metric-row">
+                        <span class="metric-label">Elastic Net:</span>
+                        <span class="metric-value">{en_auc:.4f} ± {en_std:.4f}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Random Forest:</span>
+                        <span class="metric-value">{rf_auc:.4f} ± {rf_std:.4f}</span>
+                    </div>
+            """
+            
+            # Add scores if present
+            linear_scores = strategy_data.get('linear_scores', {}) or {}
+            for score_key, score_res in linear_scores.items():
+                model_label = score_res.get('model_name', f"Score: {score_key}")
+                score_auc = score_res['mean_score']
+                score_std = score_res['std_score']
+                card_content += f"""
+                    <div class="metric-row">
+                        <span class="metric-label">{model_label}:</span>
+                        <span class="metric-value">{score_auc:.4f} ± {score_std:.4f}</span>
+                    </div>
+            """
             
             strategy_cards_html += f"""
                 <div class="strategy-card">
                     <h4>{strategy.upper()} Imputation</h4>
-                    <div class="metric-row">
-                        <span class="metric-label">Elastic Net AUC:</span>
-                        <span class="metric-value">{en_auc:.4f} ± {en_std:.4f}</span>
-                    </div>
-                    <div class="metric-row">
-                        <span class="metric-label">Random Forest AUC:</span>
-                        <span class="metric-value">{rf_auc:.4f} ± {rf_std:.4f}</span>
-                    </div>
-                    <div class="metric-row">
-                        <span class="metric-label">Best Model:</span>
-                        <span class="metric-value">{best}</span>
-                    </div>
+                    {card_content}
                 </div>
             """
         
@@ -1210,6 +1248,12 @@ class ConsolidatedReportGenerator:
             background: #fafafa;
         }}
         
+        .strategy-header {{
+            background: #f0f0f0;
+            font-weight: bold;
+            border-top: 2px solid #667eea;
+        }}
+        
         .strategy-comparison {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -1301,14 +1345,13 @@ class ConsolidatedReportGenerator:
             </div>
             
             <!-- Key Metrics Summary -->
-            <h2>📈 Performance Summary by Strategy</h2>
+            <h2>📈 Performance Summary by Strategy and Model</h2>
             <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px;">
                 <thead style="background: #667eea; color: white;">
                     <tr>
                         <th style="padding: 12px; text-align: left;">Imputation Strategy</th>
-                        <th style="padding: 12px; text-align: center;">Elastic Net AUC</th>
-                        <th style="padding: 12px; text-align: center;">Random Forest AUC</th>
-                        <th style="padding: 12px; text-align: center;">Best Model</th>
+                        <th style="padding: 12px; text-align: left;">Model</th>
+                        <th style="padding: 12px; text-align: center;">Mean CV AUC ± Std</th>
                     </tr>
                 </thead>
                 <tbody>
