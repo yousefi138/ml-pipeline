@@ -44,7 +44,7 @@ logger = setup_logging('model_training')
 np.random.seed(RANDOM_SEED)
 
 
-class PredefinedLinearScore(BaseEstimator, ClassifierMixin):
+class PredefinedLinearScore(ClassifierMixin, BaseEstimator):
     """Classifier wrapper for pre-defined linear prediction scores.
 
     This estimator applies fixed coefficients (and optional intercept) to
@@ -74,44 +74,135 @@ class PredefinedLinearScore(BaseEstimator, ClassifierMixin):
     def fit(self, X, y=None):  # noqa: D401
         """Fit the score model.
 
-        No learning is performed; this simply validates that all required
-        features are present and caches their order for fast scoring.
+        No learning is performed; this simply identifies which score features
+        are available in the input data and caches them for fast scoring.
+        
+        The score uses only features that are explicitly defined in the
+        coefficient dictionary AND present in the input data. Features in the
+        data but not in the score definition are ignored. This enables the
+        same score to work across different datasets that may contain different
+        feature sets, as long as at least some of the required features are present.
         """
-        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
-        self.feature_names_ = list(X_df.columns)
+        try:
+            logger.debug(f"Score '{self.name}' fit() START - X shape: {X.shape if hasattr(X, 'shape') else 'unknown'}, y value counts: {np.bincount(y) if y is not None else 'None'}")
+            
+            X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+            self.feature_names_ = list(X_df.columns)
+            logger.debug(f"Score '{self.name}' feature_names_: {self.feature_names_}")
 
-        missing_features = [
-            feat for feat in self.coefficients.keys() if feat not in self.feature_names_
-        ]
-        if missing_features:
-            raise ValueError(
-                f"Predefined score '{self.name}' requires missing features: {missing_features}"
-            )
+            # Find which features from the score are actually available in the data
+            self.used_features_ = [
+                feat for feat in self.coefficients.keys() 
+                if feat in self.feature_names_
+            ]
+            logger.debug(f"Score '{self.name}' coefficients.keys(): {list(self.coefficients.keys())}, used_features_: {self.used_features_}")
+            
+            if not self.used_features_:
+                # Only raise an error if NONE of the score's features are available
+                error_msg = (
+                    f"Predefined score '{self.name}' could not find any of its required "
+                    f"features {list(self.coefficients.keys())} in the input data. "
+                    f"Available features in data: {self.feature_names_}"
+                )
+                raise ValueError(error_msg)
+            
+            # Warn if some features are available but others are missing
+            missing_features = [
+                feat for feat in self.coefficients.keys() 
+                if feat not in self.feature_names_
+            ]
+            if missing_features:
+                logger.debug(
+                    f"Score '{self.name}' using {len(self.used_features_)} of {len(self.coefficients)} "
+                    f"features. Missing: {missing_features}. Using: {self.used_features_}"
+                )
+            
+            # Create coefficient vector for only the available features
+            self.coef_vector_ = np.array([
+                self.coefficients[feat] for feat in self.used_features_
+            ], dtype=float)
+            logger.debug(f"Score '{self.name}' coef_vector_: {self.coef_vector_}, intercept: {self.intercept}")
 
-        self.used_features_ = [feat for feat in self.feature_names_ if feat in self.coefficients]
-        self.coef_vector_ = np.array([
-            self.coefficients[feat] for feat in self.used_features_
-        ], dtype=float)
-
-        # Binary classes assumed {0, 1}
-        self.classes_ = np.array([0, 1])
-        return self
+            # Binary classes assumed {0, 1}
+            self.classes_ = np.array([0, 1])
+            logger.debug(f"Score '{self.name}' fit() END - initialized successfully")
+            return self
+        except Exception as e:
+            logger.error(f"Error in PredefinedLinearScore.fit(): {type(e).__name__}: {e}", exc_info=True)
+            raise
 
     def decision_function(self, X):
-        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
-        scores = np.dot(X_df[self.used_features_].values, self.coef_vector_) + self.intercept
-        return scores
+        """Calculate linear scores using available features.
+        
+        Only features present in both the score definition and the input data
+        are used. This produces a partial sum if some features are missing.
+        """
+        try:
+            X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+            logger.debug(f"Score '{self.name}' decision_function called with X shape {X_df.shape}, used_features_={getattr(self, 'used_features_', 'NOT SET')}")
+            
+            if not hasattr(self, 'used_features_'):
+                logger.error(f"Score '{self.name}' decision_function: used_features_ not set! fit() may not have been called.")
+                raise RuntimeError(f"Score '{self.name}' has not been fitted yet.")
+            
+            feature_data = X_df[self.used_features_].values
+            logger.debug(f"Score '{self.name}' feature_data shape: {feature_data.shape}, first row: {feature_data[0] if len(feature_data) > 0 else 'empty'}")
+            
+            # Log info about missing/NaN values
+            if np.any(np.isnan(feature_data)):
+                nan_pct = np.sum(np.isnan(feature_data)) / feature_data.size * 100
+                logger.warning(
+                    f"Score '{self.name}' decision_function: {nan_pct:.1f}% NaN values in "
+                    f"features {self.used_features_} (shape: {feature_data.shape})"
+                )
+            
+            scores = np.dot(feature_data, self.coef_vector_) + self.intercept
+            logger.debug(f"Score '{self.name}' scores computed: shape {scores.shape}, first 3: {scores[:3] if len(scores) >= 3 else scores}, has NaN: {np.any(np.isnan(scores))}")
+            
+            if np.any(np.isnan(scores)):
+                logger.warning(
+                    f"Score '{self.name}' decision_function returned NaN for {np.sum(np.isnan(scores))} "
+                    f"of {len(scores)} samples"
+                )
+            
+            return scores
+        except Exception as e:
+            logger.error(f"Error in PredefinedLinearScore.decision_function(): {e}", exc_info=True)
+            raise
 
     def predict_proba(self, X):
-        scores = self.decision_function(X)
-        # Logistic transform for probabilities
-        probs_pos = 1.0 / (1.0 + np.exp(-scores))
-        probs_neg = 1.0 - probs_pos
-        return np.vstack([probs_neg, probs_pos]).T
+        try:
+            logger.debug(f"Score '{self.name}' predict_proba called with X shape {X.shape if hasattr(X, 'shape') else 'unknown'}")
+            scores = self.decision_function(X)
+            logger.debug(f"Score '{self.name}' decision_function returned scores: shape {scores.shape}, has NaN: {np.any(np.isnan(scores))}")
+            
+            # Logistic transform for probabilities
+            probs_pos = 1.0 / (1.0 + np.exp(-scores))
+            probs_neg = 1.0 - probs_pos
+            probs = np.vstack([probs_neg, probs_pos]).T
+            logger.debug(f"Score '{self.name}' probabilities computed: shape {probs.shape}, has NaN: {np.any(np.isnan(probs))}")
+            
+            if np.any(np.isnan(probs)):
+                logger.warning(
+                    f"Score '{self.name}' predict_proba returned NaN for {np.sum(np.isnan(probs))} "
+                    f"values out of {probs.size}"
+                )
+            
+            return probs
+        except Exception as e:
+            logger.error(f"Error in PredefinedLinearScore.predict_proba(): {e}", exc_info=True)
+            raise
 
     def predict(self, X):
-        probs = self.predict_proba(X)[:, 1]
-        return (probs >= 0.5).astype(int)
+        try:
+            logger.debug(f"Score '{self.name}' predict called with X shape {X.shape if hasattr(X, 'shape') else 'unknown'}")
+            probs = self.predict_proba(X)[:, 1]
+            preds = (probs >= 0.5).astype(int)
+            logger.debug(f"Score '{self.name}' predict returning {len(preds)} predictions, unique_values: {np.unique(preds)}")
+            return preds
+        except Exception as e:
+            logger.error(f"Error in PredefinedLinearScore.predict(): {e}", exc_info=True)
+            raise
 
     def get_score_coefficients(self):
         """Return coefficient mapping used for this score."""
@@ -637,14 +728,35 @@ def evaluate_predefined_scores(X, y, imputation_strategy='median'):
         ])
 
         # Cross-validated AUC scores
-        cv_scores = cross_val_score(
-            pipeline,
-            X,
-            y,
-            cv=cv_outer,
-            scoring=CV_SCORING,
-            n_jobs=N_JOBS
-        )
+        try:
+            logger.debug(f"About to call cross_val_score with CV_SCORING='{CV_SCORING}', n_jobs={N_JOBS}")
+            
+            # Use make_scorer to ensure needs_proba=True is respected
+            from sklearn.metrics import get_scorer
+            scorer = get_scorer(CV_SCORING)  # Get default scorer for 'roc_auc'
+            logger.debug(f"Scorer object: {scorer}")
+            
+            cv_scores = cross_val_score(
+                pipeline,
+                X,
+                y,
+                cv=cv_outer,
+                scoring=CV_SCORING,
+                n_jobs=N_JOBS,
+                error_score='raise'
+            )
+            logger.debug(f"cross_val_score returned: {cv_scores}, has NaN: {np.any(np.isnan(cv_scores))}")
+        except ValueError as e:
+            # Only catch error if no features from the score are found in data
+            logger.error(f"cross_val_score raised ValueError: {e}")
+            if 'could not find any of its required features' in str(e):
+                logger.error(f"Cannot evaluate predefined score '{score_name}': {e}")
+                cv_scores = np.array([np.nan] * N_SPLITS_OUTER)
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"cross_val_score raised {type(e).__name__}: {e}", exc_info=True)
+            cv_scores = np.array([np.nan] * N_SPLITS_OUTER)
 
         cv_scores = np.array(cv_scores)
 
