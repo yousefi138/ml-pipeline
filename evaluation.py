@@ -896,6 +896,65 @@ class ConsolidatedReportGenerator:
         self.strategies = list(all_results_dict.keys())
         logger.info(f"Initialized ConsolidatedReportGenerator for {len(self.strategies)} strategies")
     
+    def get_strategy_model_parameters(self, strategy):
+        """
+        Extract final model parameters for both models in a strategy.
+        
+        Parameters
+        ----------
+        strategy : str
+            Imputation strategy name
+        
+        Returns
+        -------
+        params_report : dict
+            Final model parameters for elastic net and random forest
+        """
+        strategy_data = self.all_results.get(strategy, {})
+        params_report = {}
+        
+        # Elastic Net parameters
+        en_results = strategy_data.get('elastic_net', {})
+        if en_results and 'final_model' in en_results:
+            en_model = en_results['final_model']
+            if hasattr(en_model, 'named_steps') and 'clf' in en_model.named_steps:
+                en_base = en_model.named_steps['clf']
+            else:
+                en_base = en_model
+            
+            en_params = {
+                'model_type': 'LogisticRegression (Elastic Net)',
+                'hyperparameters': en_results.get('best_params', {}),
+                'cv_mean_auc': float(en_results.get('mean_score', 0)),
+                'cv_std_auc': float(en_results.get('std_score', 0)),
+                'coefficients': en_base.coef_[0].tolist() if hasattr(en_base, 'coef_') else None,
+                'intercept': float(en_base.intercept_[0]) if hasattr(en_base, 'intercept_') else None,
+                'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None
+            }
+            params_report['elastic_net'] = en_params
+        
+        # Random Forest parameters
+        rf_results = strategy_data.get('random_forest', {})
+        if rf_results and 'final_model' in rf_results:
+            rf_model = rf_results['final_model']
+            if hasattr(rf_model, 'named_steps') and 'clf' in rf_model.named_steps:
+                rf_base = rf_model.named_steps['clf']
+            else:
+                rf_base = rf_model
+            
+            rf_params = {
+                'model_type': 'RandomForestClassifier',
+                'hyperparameters': rf_results.get('best_params', {}),
+                'cv_mean_auc': float(rf_results.get('mean_score', 0)),
+                'cv_std_auc': float(rf_results.get('std_score', 0)),
+                'n_trees': rf_base.n_estimators,
+                'feature_importances': rf_base.feature_importances_.tolist() if hasattr(rf_base, 'feature_importances_') else None,
+                'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None
+            }
+            params_report['random_forest'] = rf_params
+        
+        return params_report
+    
     def create_comparison_dataframe(self):
         """
         Create a comprehensive comparison DataFrame across all strategies and models.
@@ -1023,6 +1082,11 @@ class ConsolidatedReportGenerator:
                         'std_auc': float(score_res['std_score']),
                         'cv_scores': score_res['cv_scores'].tolist()
                     }
+            
+            # Add final model parameters with detailed coefficients and feature importances
+            final_params = self.get_strategy_model_parameters(strategy)
+            if final_params:
+                strategy_entry['final_model_parameters'] = final_params
 
             consolidated_json['results'][strategy] = strategy_entry
         
@@ -1032,6 +1096,129 @@ class ConsolidatedReportGenerator:
         
         logger.info(f"Consolidated JSON saved to {filepath}")
         return filepath
+    
+    def _build_consolidated_model_params_html(self, params, model_name):
+        """
+        Build HTML section for model parameters in consolidated report.
+        Similar to ModelEvaluator._build_model_params_html but for consolidated view.
+        
+        Parameters
+        ----------
+        params : dict
+            Model parameters dictionary
+        model_name : str
+            Name of the model ('Elastic Net' or 'Random Forest')
+        
+        Returns
+        -------
+        html : str
+            HTML string for model parameters section
+        """
+        if not params:
+            return ""
+        
+        model_type = params.get('model_type', 'Unknown')
+        hyperparams = params.get('hyperparameters', {})
+        cv_mean = params.get('cv_mean_auc', 0)
+        cv_std = params.get('cv_std_auc', 0)
+        
+        # Build hyperparameters section
+        hyperparam_html = ""
+        for key, value in hyperparams.items():
+            hyperparam_html += f"""<div class="param-group">
+                <label>{key}:</label>
+                <code>{value}</code>
+            </div>"""
+        
+        # Build model-specific section
+        specific_html = ""
+        if model_name == 'Elastic Net':
+            coefficients = params.get('coefficients', [])
+            intercept = params.get('intercept', 0)
+            non_zero_coefs = sum(1 for c in coefficients if c != 0) if coefficients else 0
+            
+            specific_html = f"""<h4>Model Specifics</h4>
+            <div class="metric-grid">
+                <div class="metric-box">
+                    <div class="label">Non-Zero Coefficients</div>
+                    <div class="value">{non_zero_coefs}</div>
+                </div>
+                <div class="metric-box">
+                    <div class="label">Total Features</div>
+                    <div class="value">{len(coefficients) if coefficients else 0}</div>
+                </div>
+                <div class="metric-box">
+                    <div class="label">Intercept</div>
+                    <div class="value">{intercept:.6f}</div>
+                </div>
+            </div>
+            <h4>Top Non-Zero Coefficients</h4>
+            <div class="feature-importance">"""
+            
+            # Get top coefficients
+            if coefficients:
+                indexed_coefs = [(i, c) for i, c in enumerate(coefficients)]
+                sorted_coefs = sorted(indexed_coefs, key=lambda x: abs(x[1]), reverse=True)[:10]
+                
+                for feat_idx, coef_val in sorted_coefs:
+                    if coef_val != 0:
+                        specific_html += f"""<div class="feature-importance-item">
+                        <div>Feature {feat_idx}: <strong>{coef_val:.6f}</strong></div>
+                    </div>"""
+            specific_html += "</div>"
+            
+        elif model_name == 'Random Forest':
+            n_trees = params.get('n_trees', 0)
+            importances = params.get('feature_importances', [])
+            
+            specific_html = f"""<h4>Model Specifics</h4>
+            <div class="metric-grid">
+                <div class="metric-box">
+                    <div class="label">Number of Trees</div>
+                    <div class="value">{n_trees}</div>
+                </div>
+                <div class="metric-box">
+                    <div class="label">Total Features</div>
+                    <div class="value">{len(importances) if importances else 0}</div>
+                </div>
+            </div>
+            <h4>Top 10 Feature Importances</h4>
+            <div class="feature-importance">"""
+            
+            # Get top features
+            if importances:
+                indexed_imp = [(i, imp) for i, imp in enumerate(importances)]
+                sorted_imp = sorted(indexed_imp, key=lambda x: x[1], reverse=True)[:10]
+                
+                for feat_idx, imp_val in sorted_imp:
+                    bar_width = imp_val * 100
+                    specific_html += f"""<div class="feature-importance-item">
+                        <div style="flex: 1;">Feature {feat_idx}</div>
+                        <div style="flex: 2;">
+                            <div class="importance-bar" style="width: {bar_width}%;"></div>
+                            <div style="font-size: 0.85em; color: #666;">{imp_val:.6f}</div>
+                        </div>
+                    </div>"""
+            specific_html += "</div>"
+        
+        html = f"""<div class="model-card">
+            <h3>{model_name} - {model_type}</h3>
+            <div class="metric-grid">
+                <div class="metric-box">
+                    <div class="label">Mean CV AUC</div>
+                    <div class="value">{cv_mean:.6f}</div>
+                </div>
+                <div class="metric-box">
+                    <div class="label">Std Dev</div>
+                    <div class="value">±{cv_std:.6f}</div>
+                </div>
+            </div>
+            <h4>Hyperparameters</h4>
+            {hyperparam_html}
+            {specific_html}
+        </div>"""
+        
+        return html
     
     def generate_consolidated_html_report(self, filename='consolidated_results.html'):
         """
@@ -1131,6 +1318,31 @@ class ConsolidatedReportGenerator:
                     <h4>{strategy.upper()} Imputation</h4>
                     {card_content}
                 </div>
+            """
+        
+        # Build model parameters HTML for each strategy
+        strategy_params_html = ""
+        for strategy in self.strategies:
+            strategy_params = self.get_strategy_model_parameters(strategy)
+            en_params_html = ""
+            rf_params_html = ""
+            
+            if strategy_params:
+                en_params_html = self._build_consolidated_model_params_html(
+                    strategy_params.get('elastic_net', {}), 'Elastic Net'
+                )
+                rf_params_html = self._build_consolidated_model_params_html(
+                    strategy_params.get('random_forest', {}), 'Random Forest'
+                )
+            
+            strategy_params_html += f"""
+            <div class="strategy-details">
+                <h3>{strategy.upper()} - Model Parameters</h3>
+                <div class="models-grid">
+                    {en_params_html}
+                    {rf_params_html}
+                </div>
+            </div>
             """
         
         html_content = f"""<!DOCTYPE html>
@@ -1292,6 +1504,128 @@ class ConsolidatedReportGenerator:
             font-weight: bold;
         }}
         
+        .strategy-details {{
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }}
+        
+        .strategy-details h3 {{
+            color: #667eea;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }}
+        
+        .models-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(45%, 1fr));
+            gap: 20px;
+        }}
+        
+        .model-card {{
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }}
+        
+        .model-card h3 {{
+            color: #667eea;
+            font-size: 1.1em;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }}
+        
+        .model-card h4 {{
+            color: #555;
+            font-size: 0.95em;
+            margin-top: 15px;
+            margin-bottom: 10px;
+        }}
+        
+        .metric-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 15px;
+        }}
+        
+        .metric-box {{
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            text-align: center;
+        }}
+        
+        .metric-box .label {{
+            font-size: 0.85em;
+            color: #666;
+            font-weight: bold;
+        }}
+        
+        .metric-box .value {{
+            font-size: 1em;
+            color: #667eea;
+            font-weight: bold;
+            margin-top: 5px;
+        }}
+        
+        .param-group {{
+            background: white;
+            padding: 8px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+        }}
+        
+        .param-group label {{
+            display: inline-block;
+            font-weight: bold;
+            color: #555;
+            min-width: 100px;
+        }}
+        
+        .param-group code {{
+            background: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.9em;
+            color: #d63384;
+            word-break: break-word;
+        }}
+        
+        .feature-importance {{
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+        }}
+        
+        .feature-importance-item {{
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            margin-bottom: 8px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+        }}
+        
+        .importance-bar {{
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            height: 20px;
+            border-radius: 3px;
+            min-height: 20px;
+            margin-bottom: 4px;
+        }}
+        
         .footer {{
             background: #f8f9fa;
             padding: 20px;
@@ -1315,6 +1649,10 @@ class ConsolidatedReportGenerator:
             }}
             
             .strategy-comparison {{
+                grid-template-columns: 1fr;
+            }}
+            
+            .models-grid {{
                 grid-template-columns: 1fr;
             }}
             
@@ -1368,6 +1706,10 @@ class ConsolidatedReportGenerator:
             <div class="strategy-comparison">
                 {strategy_cards_html}
             </div>
+            
+            <!-- Final Model Parameters -->
+            <h2>⚙️ Final Model Parameters & Importance Rankings</h2>
+            {strategy_params_html}
             
             <!-- Interpretation Guide -->
             <h2>💡 How to Interpret Results</h2>
