@@ -30,7 +30,7 @@ class ModelEvaluator:
     Includes reporting on different imputation strategies used during training.
     """
     
-    def __init__(self, model_results_dict):
+    def __init__(self, model_results_dict, feature_names=None):
         """
         Initialize evaluator with nested CV results from both models.
         
@@ -39,12 +39,19 @@ class ModelEvaluator:
         model_results_dict : dict
             Dictionary containing 'elastic_net' and 'random_forest' results
             Can also include 'imputation_strategy' for single strategy evaluation
+        feature_names : list, optional
+            List of feature names corresponding to model features.
+            If None, will try to extract from model_results_dict
         """
         self.results = model_results_dict
         self.en_results = model_results_dict['elastic_net']
         self.rf_results = model_results_dict['random_forest']
         self.best_model_name = model_results_dict['best_model_name']
         self.imputation_strategy = model_results_dict.get('imputation_strategy', 'unknown')
+        # Extract feature names from results if not provided
+        self.feature_names = feature_names or model_results_dict.get('feature_names', None)
+        # Prefer transformed feature names (after OneHotEncoding) for accurate reporting
+        self.transformed_feature_names = model_results_dict.get('transformed_feature_names', None)
     
     def generate_cv_summary(self):
         """
@@ -105,7 +112,9 @@ class ModelEvaluator:
             'cv_std_auc': float(self.en_results['std_score']),
             'coefficients': en_base.coef_[0].tolist() if hasattr(en_base, 'coef_') else None,
             'intercept': float(en_base.intercept_[0]) if hasattr(en_base, 'intercept_') else None,
-            'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None
+            'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None,
+            'feature_names': self.feature_names,
+            'transformed_feature_names': self.transformed_feature_names
         }
         params_report['elastic_net'] = en_params
         
@@ -122,7 +131,9 @@ class ModelEvaluator:
             'cv_std_auc': float(self.rf_results['std_score']),
             'n_trees': rf_base.n_estimators,
             'feature_importances': rf_base.feature_importances_.tolist() if hasattr(rf_base, 'feature_importances_') else None,
-            'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None
+            'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None,
+            'feature_names': self.feature_names,
+            'transformed_feature_names': self.transformed_feature_names
         }
         params_report['random_forest'] = rf_params
         
@@ -643,8 +654,12 @@ class ModelEvaluator:
         specific_html = ""
         if model_name == 'Elastic Net':
             coefficients = params.get('coefficients', [])
+            feature_names = params.get('feature_names', None)
+            transformed_feature_names = params.get('transformed_feature_names', None)
+            # Use transformed names if available (after OneHotEncoding), otherwise original names
+            feature_names_to_use = transformed_feature_names or feature_names
             intercept = params.get('intercept', 0)
-            non_zero_coefs = sum(1 for c in coefficients if c != 0)
+            non_zero_coefs = sum(1 for c in coefficients if c != 0) if coefficients else 0
             
             specific_html = f"""<h3>Model Specifics</h3>
             <div class="metric-grid">
@@ -654,7 +669,7 @@ class ModelEvaluator:
                 </div>
                 <div class="metric-box">
                     <div class="label">Total Features</div>
-                    <div class="value">{len(coefficients)}</div>
+                    <div class="value">{len(coefficients) if coefficients else 0}</div>
                 </div>
                 <div class="metric-box">
                     <div class="label">Intercept</div>
@@ -665,19 +680,26 @@ class ModelEvaluator:
             <div class="feature-importance">"""
             
             # Get top coefficients
-            indexed_coefs = [(i, c) for i, c in enumerate(coefficients)]
-            sorted_coefs = sorted(indexed_coefs, key=lambda x: abs(x[1]), reverse=True)[:10]
-            
-            for feat_idx, coef_val in sorted_coefs:
-                if coef_val != 0:
-                    specific_html += f"""<div class="feature-importance-item">
-                    <div>Feature {feat_idx}: <strong>{coef_val:.6f}</strong></div>
-                </div>"""
+            if coefficients:
+                indexed_coefs = [(i, c) for i, c in enumerate(coefficients)]
+                sorted_coefs = sorted(indexed_coefs, key=lambda x: abs(x[1]), reverse=True)[:10]
+                
+                for feat_idx, coef_val in sorted_coefs:
+                    if coef_val != 0:
+                        # Use transformed/original feature name if available, otherwise use index
+                        feat_label = feature_names_to_use[feat_idx] if feature_names_to_use and feat_idx < len(feature_names_to_use) else f"Feature {feat_idx}"
+                        specific_html += f"""<div class="feature-importance-item">
+                        <div><strong>{feat_label}</strong>: {coef_val:.6f}</div>
+                    </div>"""
             specific_html += "</div>"
             
         elif model_name == 'Random Forest':
             n_trees = params.get('n_trees', 0)
             importances = params.get('feature_importances', [])
+            feature_names = params.get('feature_names', None)
+            transformed_feature_names = params.get('transformed_feature_names', None)
+            # Use transformed names if available (after OneHotEncoding), otherwise original names
+            feature_names_to_use = transformed_feature_names or feature_names
             
             specific_html = f"""<h3>Model Specifics</h3>
             <div class="metric-grid">
@@ -687,25 +709,28 @@ class ModelEvaluator:
                 </div>
                 <div class="metric-box">
                     <div class="label">Total Features</div>
-                    <div class="value">{len(importances)}</div>
+                    <div class="value">{len(importances) if importances else 0}</div>
                 </div>
             </div>
             <h3>Top 10 Feature Importances</h3>
             <div class="feature-importance">"""
             
             # Get top features
-            indexed_imp = [(i, imp) for i, imp in enumerate(importances)]
-            sorted_imp = sorted(indexed_imp, key=lambda x: x[1], reverse=True)[:10]
-            
-            for feat_idx, imp_val in sorted_imp:
-                bar_width = imp_val * 100
-                specific_html += f"""<div class="feature-importance-item">
-                    <div style="flex: 1;">Feature {feat_idx}</div>
-                    <div style="flex: 2;">
-                        <div class="importance-bar" style="width: {bar_width}%;"></div>
-                        <div style="font-size: 0.85em; color: #666;">{imp_val:.6f}</div>
-                    </div>
-                </div>"""
+            if importances:
+                indexed_imp = [(i, imp) for i, imp in enumerate(importances)]
+                sorted_imp = sorted(indexed_imp, key=lambda x: x[1], reverse=True)[:10]
+                
+                for feat_idx, imp_val in sorted_imp:
+                    # Use transformed/original feature name if available, otherwise use index
+                    feat_label = feature_names_to_use[feat_idx] if feature_names_to_use and feat_idx < len(feature_names_to_use) else f"Feature {feat_idx}"
+                    bar_width = imp_val * 100
+                    specific_html += f"""<div class="feature-importance-item">
+                        <div style="flex: 1; word-break: break-word;">{feat_label}</div>
+                        <div style="flex: 2;">
+                            <div class="importance-bar" style="width: {bar_width}%;"></div>
+                            <div style="font-size: 0.85em; color: #666;">{imp_val:.6f}</div>
+                        </div>
+                    </div>"""
             specific_html += "</div>"
         
         html = f"""<div class="model-card">
@@ -913,6 +938,10 @@ class ConsolidatedReportGenerator:
         strategy_data = self.all_results.get(strategy, {})
         params_report = {}
         
+        # Get feature names from strategy data
+        feature_names = strategy_data.get('feature_names', None)
+        transformed_feature_names = strategy_data.get('transformed_feature_names', None)
+        
         # Elastic Net parameters
         en_results = strategy_data.get('elastic_net', {})
         if en_results and 'final_model' in en_results:
@@ -929,7 +958,9 @@ class ConsolidatedReportGenerator:
                 'cv_std_auc': float(en_results.get('std_score', 0)),
                 'coefficients': en_base.coef_[0].tolist() if hasattr(en_base, 'coef_') else None,
                 'intercept': float(en_base.intercept_[0]) if hasattr(en_base, 'intercept_') else None,
-                'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None
+                'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None,
+                'feature_names': feature_names,
+                'transformed_feature_names': transformed_feature_names
             }
             params_report['elastic_net'] = en_params
         
@@ -949,7 +980,9 @@ class ConsolidatedReportGenerator:
                 'cv_std_auc': float(rf_results.get('std_score', 0)),
                 'n_trees': rf_base.n_estimators,
                 'feature_importances': rf_base.feature_importances_.tolist() if hasattr(rf_base, 'feature_importances_') else None,
-                'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None
+                'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None,
+                'feature_names': feature_names,
+                'transformed_feature_names': transformed_feature_names
             }
             params_report['random_forest'] = rf_params
         
@@ -1134,6 +1167,10 @@ class ConsolidatedReportGenerator:
         specific_html = ""
         if model_name == 'Elastic Net':
             coefficients = params.get('coefficients', [])
+            feature_names = params.get('feature_names', None)
+            transformed_feature_names = params.get('transformed_feature_names', None)
+            # Use transformed names if available (after OneHotEncoding), otherwise original names
+            feature_names_to_use = transformed_feature_names or feature_names
             intercept = params.get('intercept', 0)
             non_zero_coefs = sum(1 for c in coefficients if c != 0) if coefficients else 0
             
@@ -1162,14 +1199,20 @@ class ConsolidatedReportGenerator:
                 
                 for feat_idx, coef_val in sorted_coefs:
                     if coef_val != 0:
+                        # Use transformed/original feature name if available, otherwise use index
+                        feat_label = feature_names_to_use[feat_idx] if feature_names_to_use and feat_idx < len(feature_names_to_use) else f"Feature {feat_idx}"
                         specific_html += f"""<div class="feature-importance-item">
-                        <div>Feature {feat_idx}: <strong>{coef_val:.6f}</strong></div>
+                        <div><strong>{feat_label}</strong>: {coef_val:.6f}</div>
                     </div>"""
             specific_html += "</div>"
             
         elif model_name == 'Random Forest':
             n_trees = params.get('n_trees', 0)
             importances = params.get('feature_importances', [])
+            feature_names = params.get('feature_names', None)
+            transformed_feature_names = params.get('transformed_feature_names', None)
+            # Use transformed names if available (after OneHotEncoding), otherwise original names
+            feature_names_to_use = transformed_feature_names or feature_names
             
             specific_html = f"""<h4>Model Specifics</h4>
             <div class="metric-grid">
@@ -1191,9 +1234,11 @@ class ConsolidatedReportGenerator:
                 sorted_imp = sorted(indexed_imp, key=lambda x: x[1], reverse=True)[:10]
                 
                 for feat_idx, imp_val in sorted_imp:
+                    # Use transformed/original feature name if available, otherwise use index
+                    feat_label = feature_names_to_use[feat_idx] if feature_names_to_use and feat_idx < len(feature_names_to_use) else f"Feature {feat_idx}"
                     bar_width = imp_val * 100
                     specific_html += f"""<div class="feature-importance-item">
-                        <div style="flex: 1;">Feature {feat_idx}</div>
+                        <div style="flex: 1; word-break: break-word;">{feat_label}</div>
                         <div style="flex: 2;">
                             <div class="importance-bar" style="width: {bar_width}%;"></div>
                             <div style="font-size: 0.85em; color: #666;">{imp_val:.6f}</div>

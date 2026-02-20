@@ -893,6 +893,12 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     logger.info(f"Imputation Strategy: {imputation_strategy.upper()}")
     logger.info("=" * 60)
     
+    # Extract original feature names from X (will be DataFrame if called from data_prep)
+    feature_names = list(X.columns) if hasattr(X, 'columns') else None
+    
+    # Extract transformed feature names from the final model's preprocessor
+    transformed_feature_names = None
+    
     trainer = NestedCVTrainer(
         n_splits_outer=N_SPLITS_OUTER,
         n_splits_inner=N_SPLITS_INNER,
@@ -902,6 +908,19 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     
     # Train Elastic Net
     en_results = trainer.train_elastic_net(X, y)
+    
+    # Extract transformed feature names from Elastic Net's fitted preprocessor
+    try:
+        en_model = en_results['final_model']
+        if hasattr(en_model, 'named_steps') and 'preprocess' in en_model.named_steps:
+            preprocess = en_model.named_steps['preprocess']
+            if hasattr(preprocess, 'named_steps') and 'scale_encode' in preprocess.named_steps:
+                scale_encode = preprocess.named_steps['scale_encode']
+                if hasattr(scale_encode, 'get_feature_names_out'):
+                    transformed_feature_names = scale_encode.get_feature_names_out().tolist()
+                    logger.info(f"Extracted {len(transformed_feature_names)} transformed feature names from fitted pipeline")
+    except Exception as e:
+        logger.debug(f"Could not extract transformed feature names: {e}")
     
     # Train Random Forest
     rf_results = trainer.train_random_forest(X, y)
@@ -955,7 +974,9 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
         'random_forest': rf_results,
         'linear_scores': linear_score_results,
         'best_model_name': best_model_name,
-        'imputation_strategy': imputation_strategy
+        'imputation_strategy': imputation_strategy,
+        'feature_names': feature_names,
+        'transformed_feature_names': transformed_feature_names
     }
     
     # Save the complete training results to cache for future runs
