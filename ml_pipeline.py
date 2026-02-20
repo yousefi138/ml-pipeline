@@ -19,7 +19,9 @@ from config import (
     RANDOM_SEED, PROJECT_PATH, DATA_FILE, DATA_DIR, RESULTS_DIR, MODELS_DIR, REPORTS_DIR
 )
 from data_prep import prepare_pipeline_data
-from model_training import run_full_pipeline
+from model_training import (
+    run_full_pipeline, check_cached_models_exist, load_cached_training_results
+)
 from evaluation import generate_full_evaluation_report, ConsolidatedReportGenerator
 from imputation import MissingnessAnalyzer
 from utils import setup_logging
@@ -49,6 +51,15 @@ Examples:
   python ml_pipeline.py --dataset breast_cancer_survival.csv
   python ml_pipeline.py --dataset /full/path/to/breast_cancer_survival.csv
   python ml_pipeline.py --dataset flchain_survival.csv --target-column death --time-column futime
+  python ml_pipeline.py --retrain
+  python ml_pipeline.py --dataset breast_cancer_survival.csv --retrain
+
+CACHING BEHAVIOR:
+  By default, the pipeline checks for cached trained models and skips
+  re-training if they exist, saving significant computation time.
+  
+  Use --retrain flag to force re-training of all models from scratch,
+  overriding any cached results.
         '''
     )
     parser.add_argument(
@@ -69,6 +80,13 @@ Examples:
         type=str,
         default=None,
         help='Name of the time column in the dataset. If not provided, uses default from config.'
+    )
+    parser.add_argument(
+        '--retrain',
+        action='store_true',
+        default=False,
+        help='Force re-training of all models, ignoring cached results. '
+             'If not set, will load previously trained models if available.'
     )
     
     args = parser.parse_args()
@@ -146,12 +164,41 @@ Examples:
         all_results = {}
         strategy_summary = []
         
+        # Check which strategies have cached models
+        cache_status = check_cached_models_exist(imputation_strategies)
+        
+        if args.retrain:
+            logger.info("--retrain flag set: will re-train all models (ignoring cache)")
+        else:
+            logger.info("Checking for cached trained models...")
+            for strategy, has_cache in cache_status.items():
+                status = "✓ Found" if has_cache else "✗ Not found"
+                logger.info(f"  {status}: {strategy.upper()} imputation strategy")
+        
         for strategy in imputation_strategies:
             logger.info(f"\n{'='*60}")
-            logger.info(f"Training pipeline with {strategy.upper()} imputation")
-            logger.info(f"{'='*60}")
             
-            results = run_full_pipeline(X, y, imputation_strategy=strategy)
+            # Check if we should load from cache
+            should_load_cache = (
+                not args.retrain and 
+                cache_status[strategy]
+            )
+            
+            if should_load_cache:
+                logger.info(f"Loading cached models for {strategy.upper()} imputation")
+                results = load_cached_training_results(strategy)
+                
+                if results is None:
+                    logger.warning(f"Failed to load cache for {strategy}. Training from scratch...")
+                    logger.info(f"Training pipeline with {strategy.upper()} imputation")
+                    results = run_full_pipeline(X, y, imputation_strategy=strategy)
+            else:
+                if args.retrain:
+                    logger.info(f"Training pipeline with {strategy.upper()} imputation (re-train forced)")
+                else:
+                    logger.info(f"Training pipeline with {strategy.upper()} imputation (no cache available)")
+                results = run_full_pipeline(X, y, imputation_strategy=strategy)
+            
             all_results[strategy] = results
             
             # Store summary for later comparison
@@ -164,7 +211,7 @@ Examples:
                 'Best Model': results['best_model_name']
             })
             
-            logger.info(f"✓ {strategy.upper()} imputation training completed")
+            logger.info(f"✓ {strategy.upper()} imputation completed")
             logger.info(f"  - Best model: {results['best_model_name']}")
             logger.info(f"  - Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
             logger.info(f"  - Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")

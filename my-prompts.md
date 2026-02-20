@@ -55,3 +55,13 @@ I need the pipeline:
 * to import defined score.csv file(s)
 * apply the coefficient weights to the input data within the existing imputation and cross-validation framework 
 * add the score prediction methods implemented to the combined evalution outcome reporting
+
+## 
+Goal: to have the pipeline only re-train the models when trained model results files aren't in the expected results directory or when a re-train argument = True
+
+Currently, the pipeline needs to re-train all models even when I want to make adjustments results reporting stages at the end of the pipeline. I want to update the pipeline to:
+* check if all relevant model training information is available in the relevant results directory and if so, read model training information form there instead of re-training again from scratch.
+* However, I also want a quick over-ride to this functionality by adding an argument that can be set to force the pipeline to re-train 
+
+##
+Can you add 

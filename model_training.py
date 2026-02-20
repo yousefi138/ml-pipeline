@@ -44,6 +44,93 @@ logger = setup_logging('model_training')
 np.random.seed(RANDOM_SEED)
 
 
+# ==============================================================================
+# MODEL CACHING UTILITIES
+# ==============================================================================
+
+def _get_cache_path(strategy):
+    """Get the path where training results are cached for a given strategy."""
+    return os.path.join(MODELS_DIR, f"training_results_{strategy}.pkl")
+
+
+def check_cached_models_exist(strategies=None):
+    """
+    Check if all trained model results exist in the cache for given strategies.
+    
+    Parameters
+    ----------
+    strategies : list of str, optional
+        List of imputation strategies to check. If None, checks both 'median' and 'knn'.
+    
+    Returns
+    -------
+    dict
+        Dictionary mapping strategy to bool indicating if cache exists for that strategy.
+    """
+    if strategies is None:
+        strategies = ['median', 'knn']
+    
+    cache_status = {}
+    for strategy in strategies:
+        cache_path = _get_cache_path(strategy)
+        exists = os.path.exists(cache_path)
+        cache_status[strategy] = exists
+        logger.debug(f"Cache for {strategy} strategy: {'exists' if exists else 'missing'}")
+    
+    return cache_status
+
+
+def load_cached_training_results(strategy):
+    """
+    Load pre-trained model results from cache.
+    
+    Parameters
+    ----------
+    strategy : str
+        Imputation strategy: 'median' or 'knn'
+    
+    Returns
+    -------
+    results : dict
+        Dictionary containing cached training results, or None if cache doesn't exist
+    """
+    cache_path = _get_cache_path(strategy)
+    
+    if not os.path.exists(cache_path):
+        logger.info(f"No cached models found for {strategy} strategy at {cache_path}")
+        return None
+    
+    try:
+        results = joblib.load(cache_path)
+        logger.info(f"✓ Loaded cached training results for {strategy} imputation strategy")
+        logger.info(f"  - Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
+        logger.info(f"  - Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
+        return results
+    except Exception as e:
+        logger.warning(f"Failed to load cached results for {strategy}: {e}")
+        return None
+
+
+def save_training_results(results, strategy):
+    """
+    Save training results to cache for later reuse.
+    
+    Parameters
+    ----------
+    results : dict
+        Training results dictionary from run_full_pipeline
+    strategy : str
+        Imputation strategy: 'median' or 'knn'
+    """
+    cache_path = _get_cache_path(strategy)
+    
+    try:
+        joblib.dump(results, cache_path)
+        logger.info(f"✓ Saved training results cache for {strategy} strategy to {cache_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save training results cache for {strategy}: {e}")
+
+
 class PredefinedLinearScore(ClassifierMixin, BaseEstimator):
     """Classifier wrapper for pre-defined linear prediction scores.
 
@@ -870,6 +957,9 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
         'best_model_name': best_model_name,
         'imputation_strategy': imputation_strategy
     }
+    
+    # Save the complete training results to cache for future runs
+    save_training_results(results, imputation_strategy)
     
     return results
 
