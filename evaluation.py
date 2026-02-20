@@ -86,7 +86,16 @@ class ModelEvaluator:
     
     def get_final_model_parameters(self):
         """
-        Get and format final model parameters for both models refitted on full data.
+        Get and format final model parameters for both models.
+        
+        The final models are fit on full data using best hyperparameters from CV.
+        The CV evaluation itself used fold_models to ensure clean train/test separation:
+        - During each CV fold: imputation/scaling parameters fit only on fold training data
+        - Evaluation: used those clean fold-specific parameters on fold test data
+        
+        For the final production model reported here:
+        - Imputation/scaling parameters fit on full data (all available samples)
+        - This is appropriate for deployment on new data
         
         Returns
         -------
@@ -94,44 +103,50 @@ class ModelEvaluator:
             Final model parameters and relevant information
         """
         logger.info("=" * 60)
-        logger.info("FINAL MODEL PARAMETERS (Refitted on Full Data)")
+        logger.info("FINAL MODEL PARAMETERS (Fit on Full Data)")
+        logger.info("=" * 60)
+        logger.info("Note: CV evaluation used fold_models to ensure imputation")
+        logger.info("parameters were fit only on fold training data (correct evaluation).")
+        logger.info("These final parameters are from full-data fit (for production deployment).")
         logger.info("=" * 60)
         
         params_report = {}
         
-        # Elastic Net parameters (unwrap from Pipeline if necessary)
-        en_model = self.en_results['final_model']
-        if hasattr(en_model, 'named_steps') and 'clf' in en_model.named_steps:
-            en_base = en_model.named_steps['clf']
-        else:
-            en_base = en_model
+        # Helper function to extract model from pipeline
+        def extract_base_model(model):
+            if model is None:
+                return None
+            if hasattr(model, 'named_steps') and 'clf' in model.named_steps:
+                return model.named_steps['clf']
+            return model
+        
+        # Elastic Net parameters from final_model (fit on full data)
+        en_model = self.en_results.get('final_model')
+        en_base = extract_base_model(en_model)
         en_params = {
             'model_type': 'LogisticRegression (Elastic Net)',
-            'hyperparameters': self.en_results['best_params'],
+            'hyperparameters': self.en_results.get('best_params'),
             'cv_mean_auc': float(self.en_results['mean_score']),
             'cv_std_auc': float(self.en_results['std_score']),
-            'coefficients': en_base.coef_[0].tolist() if hasattr(en_base, 'coef_') else None,
-            'intercept': float(en_base.intercept_[0]) if hasattr(en_base, 'intercept_') else None,
-            'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None,
+            'coefficients': en_base.coef_[0].tolist() if (en_base is not None and hasattr(en_base, 'coef_')) else None,
+            'intercept': float(en_base.intercept_[0]) if (en_base is not None and hasattr(en_base, 'intercept_')) else None,
+            'classes': en_base.classes_.tolist() if (en_base is not None and hasattr(en_base, 'classes_')) else None,
             'feature_names': self.feature_names,
             'transformed_feature_names': self.transformed_feature_names
         }
         params_report['elastic_net'] = en_params
         
-        # Random Forest parameters (unwrap from Pipeline if necessary)
-        rf_model = self.rf_results['final_model']
-        if hasattr(rf_model, 'named_steps') and 'clf' in rf_model.named_steps:
-            rf_base = rf_model.named_steps['clf']
-        else:
-            rf_base = rf_model
+        # Random Forest parameters from final_model (fit on full data)
+        rf_model = self.rf_results.get('final_model')
+        rf_base = extract_base_model(rf_model)
         rf_params = {
             'model_type': 'RandomForestClassifier',
-            'hyperparameters': self.rf_results['best_params'],
+            'hyperparameters': self.rf_results.get('best_params'),
             'cv_mean_auc': float(self.rf_results['mean_score']),
             'cv_std_auc': float(self.rf_results['std_score']),
-            'n_trees': rf_base.n_estimators,
-            'feature_importances': rf_base.feature_importances_.tolist() if hasattr(rf_base, 'feature_importances_') else None,
-            'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None,
+            'n_trees': rf_base.n_estimators if (rf_base is not None and hasattr(rf_base, 'n_estimators')) else None,
+            'feature_importances': rf_base.feature_importances_.tolist() if (rf_base is not None and hasattr(rf_base, 'feature_importances_')) else None,
+            'classes': rf_base.classes_.tolist() if (rf_base is not None and hasattr(rf_base, 'classes_')) else None,
             'feature_names': self.feature_names,
             'transformed_feature_names': self.transformed_feature_names
         }
@@ -771,6 +786,162 @@ class ModelEvaluator:
         logger.info(f"Summary saved to {filepath}")
         return filepath
     
+    def export_preprocessing_parameters(self, filename=None):
+        """
+        Export preprocessing parameters (imputation, scaling, encoding) from final model.
+        
+        These parameters will be used for predictions on new observations.
+        Includes:
+        - Imputation values (medians for numeric, modes for categorical)
+        - Scaling parameters (means and standard deviations for numeric features)
+        - Categorical encoding (categories for one-hot encoding)
+        
+        Parameters
+        ----------
+        filename : str, optional
+            Custom filename. If None, uses imputation strategy in filename.
+        
+        Returns
+        -------
+        filepath : str
+            Path to saved parameters JSON file
+        """
+        if filename is None:
+            filename = f"preprocessing_parameters_{self.imputation_strategy}.json"
+        
+        filepath = f"{REPORTS_DIR}/{filename}"
+        
+        try:
+            preprocessing_params = self._extract_preprocessing_parameters()
+            
+            # Convert numpy types to Python native types for JSON serialization
+            preprocessing_params = self._convert_to_json_serializable(preprocessing_params)
+            
+            with open(filepath, 'w') as f:
+                json.dump(preprocessing_params, f, indent=2)
+            
+            logger.info(f"Preprocessing parameters exported to {filepath}")
+            logger.info(f"  - Imputation strategy: {self.imputation_strategy}")
+            logger.info(f"  - Numeric features imputed and scaled: {len(preprocessing_params.get('imputation', {}))}")
+            logger.info(f"  - Categorical features encoded: {len(preprocessing_params.get('encoding', {}))}")
+            
+            return filepath
+        except Exception as e:
+            logger.error(f"Failed to export preprocessing parameters: {e}", exc_info=True)
+            return None
+    
+    def _extract_preprocessing_parameters(self):
+        """
+        Extract preprocessing parameters from final model's preprocessing pipeline.
+        
+        Returns
+        -------
+        params : dict
+            Dictionary containing imputation, scaling, and encoding parameters
+        """
+        params = {
+            'imputation_strategy': self.imputation_strategy,
+            'imputation': {},
+            'scaling': {},
+            'encoding': {},
+            'description': 'Parameters used for preprocessing new observations'
+        }
+        
+        # Get the preprocessing pipeline from final model
+        final_model = self.en_results.get('final_model')
+        if final_model is None:
+            logger.warning("No final_model available for parameter extraction")
+            return params
+        
+        try:
+            # Navigate to preprocessing pipeline
+            if not hasattr(final_model, 'named_steps') or 'preprocess' not in final_model.named_steps:
+                logger.warning("Cannot find preprocessing pipeline in final_model")
+                return params
+            
+            preprocess_pipeline = final_model.named_steps['preprocess']
+            
+            # Extract imputation parameters
+            if hasattr(preprocess_pipeline, 'named_steps') and 'impute' in preprocess_pipeline.named_steps:
+                imputer = preprocess_pipeline.named_steps['impute']
+                self._extract_imputation_params(imputer, params)
+            
+            # Extract scaling and encoding parameters
+            if hasattr(preprocess_pipeline, 'named_steps') and 'scale_encode' in preprocess_pipeline.named_steps:
+                column_transformer = preprocess_pipeline.named_steps['scale_encode']
+                self._extract_scale_encode_params(column_transformer, params)
+            
+        except Exception as e:
+            logger.warning(f"Error extracting preprocessing parameters: {e}")
+        
+        return params
+    
+    def _extract_imputation_params(self, imputer, params):
+        """Extract imputation parameters from imputer object."""
+        try:
+            # For MedianImputationTransformer or KNNImputationTransformer
+            if hasattr(imputer, 'numeric_imputer'):
+                numeric_imputer = imputer.numeric_imputer
+                if hasattr(numeric_imputer, 'statistics_'):
+                    for i, col in enumerate(imputer.numeric_cols_):
+                        params['imputation'][col] = {
+                            'strategy': 'median',
+                            'value': numeric_imputer.statistics_[i]
+                        }
+            
+            if hasattr(imputer, 'categorical_imputer'):
+                categorical_imputer = imputer.categorical_imputer
+                if hasattr(categorical_imputer, 'statistics_'):
+                    for i, col in enumerate(imputer.categorical_cols_):
+                        params['imputation'][col] = {
+                            'strategy': 'most_frequent',
+                            'value': categorical_imputer.statistics_[i]
+                        }
+        except Exception as e:
+            logger.debug(f"Could not extract imputation parameters: {e}")
+    
+    def _extract_scale_encode_params(self, column_transformer, params):
+        """Extract scaling and encoding parameters from ColumnTransformer."""
+        try:
+            if not hasattr(column_transformer, 'transformers_'):
+                return
+            
+            for name, transformer, columns in column_transformer.transformers_:
+                if name == 'num' and hasattr(transformer, 'mean_') and hasattr(transformer, 'scale_'):
+                    # StandardScaler
+                    for i, col in enumerate(columns):
+                        params['scaling'][col] = {
+                            'mean': transformer.mean_[i],
+                            'std': transformer.scale_[i],  # This is 1/std actually, but matches scikit-learn naming
+                            'var': transformer.var_[i] if hasattr(transformer, 'var_') else None
+                        }
+                
+                elif name == 'cat' and hasattr(transformer, 'categories_'):
+                    # OneHotEncoder
+                    for i, col in enumerate(columns):
+                        if i < len(transformer.categories_):
+                            params['encoding'][col] = {
+                                'type': 'one_hot',
+                                'categories': transformer.categories_[i].tolist()
+                            }
+        except Exception as e:
+            logger.debug(f"Could not extract scaling/encoding parameters: {e}")
+    
+    def _convert_to_json_serializable(self, obj):
+        """Convert numpy types to Python native types for JSON serialization."""
+        if isinstance(obj, dict):
+            return {k: self._convert_to_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._convert_to_json_serializable(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
+    
     def plot_cv_scores(self, filename=None):
         """
         Create visualization comparing CV scores across folds.
@@ -877,6 +1048,7 @@ def generate_full_evaluation_report(model_results):
     # Generate all reports and visualizations
     evaluator.save_report_to_json()
     evaluator.save_summary_to_csv()
+    evaluator.export_preprocessing_parameters()
     evaluator.generate_html_report()
     evaluator.plot_cv_scores()
     evaluator.plot_model_comparison()
@@ -925,6 +1097,9 @@ class ConsolidatedReportGenerator:
         """
         Extract final model parameters for both models in a strategy.
         
+        The final models are fit on full data using best hyperparameters from CV.
+        The CV evaluation itself used fold_models to ensure clean train/test separation.
+        
         Parameters
         ----------
         strategy : str
@@ -942,49 +1117,53 @@ class ConsolidatedReportGenerator:
         feature_names = strategy_data.get('feature_names', None)
         transformed_feature_names = strategy_data.get('transformed_feature_names', None)
         
-        # Elastic Net parameters
-        en_results = strategy_data.get('elastic_net', {})
-        if en_results and 'final_model' in en_results:
-            en_model = en_results['final_model']
-            if hasattr(en_model, 'named_steps') and 'clf' in en_model.named_steps:
-                en_base = en_model.named_steps['clf']
-            else:
-                en_base = en_model
-            
-            en_params = {
-                'model_type': 'LogisticRegression (Elastic Net)',
-                'hyperparameters': en_results.get('best_params', {}),
-                'cv_mean_auc': float(en_results.get('mean_score', 0)),
-                'cv_std_auc': float(en_results.get('std_score', 0)),
-                'coefficients': en_base.coef_[0].tolist() if hasattr(en_base, 'coef_') else None,
-                'intercept': float(en_base.intercept_[0]) if hasattr(en_base, 'intercept_') else None,
-                'classes': en_base.classes_.tolist() if hasattr(en_base, 'classes_') else None,
-                'feature_names': feature_names,
-                'transformed_feature_names': transformed_feature_names
-            }
-            params_report['elastic_net'] = en_params
+        # Helper function to extract model from pipeline
+        def extract_base_model(model):
+            if model is None:
+                return None
+            if hasattr(model, 'named_steps') and 'clf' in model.named_steps:
+                return model.named_steps['clf']
+            return model
         
-        # Random Forest parameters
+        # Elastic Net parameters from final_model (fit on full data)
+        en_results = strategy_data.get('elastic_net', {})
+        if en_results:
+            en_model = en_results.get('final_model')
+            if en_model is not None:
+                en_base = extract_base_model(en_model)
+                en_params = {
+                    'model_type': 'LogisticRegression (Elastic Net)',
+                    'hyperparameters': en_results.get('best_params', {}),
+                    'cv_mean_auc': float(en_results.get('mean_score', 0)),
+                    'cv_std_auc': float(en_results.get('std_score', 0)),
+                    'coefficients': en_base.coef_[0].tolist() if (en_base is not None and hasattr(en_base, 'coef_')) else None,
+                    'intercept': float(en_base.intercept_[0]) if (en_base is not None and hasattr(en_base, 'intercept_')) else None,
+                    'classes': en_base.classes_.tolist() if (en_base is not None and hasattr(en_base, 'classes_')) else None,
+                    'feature_names': feature_names,
+                    'transformed_feature_names': transformed_feature_names
+                }
+                params_report['elastic_net'] = en_params
+        
+        # Random Forest parameters from final_model (fit on full data)
         rf_results = strategy_data.get('random_forest', {})
-        if rf_results and 'final_model' in rf_results:
-            rf_model = rf_results['final_model']
-            if hasattr(rf_model, 'named_steps') and 'clf' in rf_model.named_steps:
-                rf_base = rf_model.named_steps['clf']
-            else:
-                rf_base = rf_model
-            
-            rf_params = {
-                'model_type': 'RandomForestClassifier',
-                'hyperparameters': rf_results.get('best_params', {}),
-                'cv_mean_auc': float(rf_results.get('mean_score', 0)),
-                'cv_std_auc': float(rf_results.get('std_score', 0)),
-                'n_trees': rf_base.n_estimators,
-                'feature_importances': rf_base.feature_importances_.tolist() if hasattr(rf_base, 'feature_importances_') else None,
-                'classes': rf_base.classes_.tolist() if hasattr(rf_base, 'classes_') else None,
-                'feature_names': feature_names,
-                'transformed_feature_names': transformed_feature_names
-            }
-            params_report['random_forest'] = rf_params
+        if rf_results:
+            rf_model = rf_results.get('final_model')
+            if rf_model is not None:
+                rf_base = extract_base_model(rf_model)
+                rf_params = {
+                    'model_type': 'RandomForestClassifier',
+                    'hyperparameters': rf_results.get('best_params', {}),
+                    'cv_mean_auc': float(rf_results.get('mean_score', 0)),
+                    'cv_std_auc': float(rf_results.get('std_score', 0)),
+                    'n_trees': rf_base.n_estimators if (rf_base is not None and hasattr(rf_base, 'n_estimators')) else None,
+                    'feature_importances': rf_base.feature_importances_.tolist() if (rf_base is not None and hasattr(rf_base, 'feature_importances_')) else None,
+                    'classes': rf_base.classes_.tolist() if (rf_base is not None and hasattr(rf_base, 'classes_')) else None,
+                    'feature_names': feature_names,
+                    'transformed_feature_names': transformed_feature_names
+                }
+                params_report['random_forest'] = rf_params
+        
+        
         
         return params_report
     

@@ -468,11 +468,12 @@ class NestedCVTrainer:
         
         cv_scores = np.array(cv_scores)
         
-        # Train final pipeline on full data with best hyperparameters
-        # (Use most common best parameters across folds)
+        # Use most common best parameters across folds
         best_params_overall = self._get_most_common_params(best_params_list)
 
-        # Rebuild pipeline to ensure a fresh, unfitted preprocessor
+        # Train final model on full data with best hyperparameters
+        # The fold_models have imputation fit only on their respective training folds (clean evaluation).
+        # For the final production model, we fit on all available data (X, y) using the best hyperparameters.
         final_imputer = get_imputation_transformer(self.imputation_strategy)
         final_scaling_encoding_transformers = []
         if numeric_cols:
@@ -613,9 +614,12 @@ class NestedCVTrainer:
         
         cv_scores = np.array(cv_scores)
 
-        # Train final pipeline on full data with best hyperparameters
+        # Use most common best parameters across folds
         best_params_overall = self._get_most_common_params(best_params_list)
 
+        # Train final model on full data with best hyperparameters
+        # The fold_models have imputation fit only on their respective training folds (clean evaluation).
+        # For the final production model, we fit on all available data (X, y) using the best hyperparameters.
         final_imputer = get_imputation_transformer(self.imputation_strategy)
         final_scaling_encoding_transformers = []
         if numeric_cols:
@@ -848,6 +852,7 @@ def evaluate_predefined_scores(X, y, imputation_strategy='median'):
         cv_scores = np.array(cv_scores)
 
         # Fit final pipeline on full data for potential downstream use
+        # This gives imputation parameters fit on all available data (for production deployment)
         pipeline.fit(X, y)
 
         results[key] = {
@@ -963,6 +968,7 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     logger.info("=" * 60)
     
     # Save models with imputation strategy in filename
+    # final_models are fit on full data using best hyperparameters from CV
     en_filename = f"{MODELS_DIR}/elastic_net_{imputation_strategy}_final.pkl"
     rf_filename = f"{MODELS_DIR}/random_forest_{imputation_strategy}_final.pkl"
     joblib.dump(en_results['final_model'], en_filename)
