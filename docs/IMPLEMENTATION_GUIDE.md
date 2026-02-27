@@ -1,552 +1,643 @@
-# Scalable & Reproducible ML Pipeline Implementation Guide
+# ML Pipeline - Implementation Guide
 
-## Overview
+Complete technical documentation of the ML Pipeline for developers and advanced users. For a quick overview, see [QUICK_GUIDE.md](QUICK_GUIDE.md).
 
-This implementation provides a complete, production-ready supervised machine learning pipeline for binary classification on the breast cancer survival dataset. The pipeline follows best practices for reproducibility, scalability, and rigorous model evaluation through nested cross-validation.
+## Table of Contents
+
+1. [Pipeline Overview](#pipeline-overview)
+2. [System Architecture](#system-architecture)
+3. [Core Modules](#core-modules)
+4. [Data Preparation](#data-preparation)
+5. [Imputation Strategies](#imputation-strategies)
+6. [Model Training](#model-training)
+7. [Evaluation & Reporting](#evaluation--reporting)
+8. [Configuration](#configuration)
+9. [Advanced Usage](#advanced-usage)
+
+## Pipeline Overview
+
+The ML Pipeline is a comprehensive machine learning framework designed for binary classification with robust cross-validation and missing data handling.
+
+**Key Characteristics**:
+- **Nested Cross-Validation**: Outer CV for honest performance estimation, inner CV for hyperparameter tuning
+- **Data Leakage Prevention**: All preprocessing fitted on training data only
+- **Multiple Imputation Strategies**: Tests both simple (median) and sophisticated (KNN) approaches
+- **Model Caching**: Trained models cached to avoid redundant computation
+- **Comprehensive Reporting**: JSON/CSV results, visualizations, and feature importance
+
+**Supported Models**:
+1. **Elastic Net Logistic Regression**: Simple, interpretable linear model with L1/L2 regularization
+2. **Random Forest**: Ensemble model with built-in feature importance
+
+## System Architecture
+
+### Component Diagram
+
+```
+┌─────────────────────────────────────────┐
+│          ml_pipeline.py (Main)          │
+│     (Orchestrates full workflow)        │
+└─────────┬─────────────────────────────┬─┘
+          │                             │
+    ┌─────▼──────┐              ┌───────▼────────┐
+    │ data_prep  │              │ model_training │
+    │ (Step 1)   │◄────────────►│  (Step 2)      │
+    └─────┬──────┘              └───────┬────────┘
+          │                             │
+          │        ┌──────────────┐     │
+          └───────►│  imputation  │◄────┘
+                   │  (Strategies)│
+                   └──────────────┘
+                         │
+                    ┌────▼─────┐
+                    │evaluation │
+                    │ (Step 3)  │
+                    └────┬─────┘
+                         │
+                    ┌────▼──────────┐
+                    │ reports/      │
+                    │ visualizations│
+                    │ saved models  │
+                    └───────────────┘
+
+Configuration Layer (config.py):
+- Paths, seeds, CV splits, hyperparameters
+
+Utility Layer (utils.py):
+- Logging, validation, feature processing
+```
+
+## Core Modules
+
+### Module Overview
+
+| Module | Purpose | Main Functions |
+|--------|---------|----------------|
+| `config.py` | Configuration & constants | Path/seed/CV settings |
+| `utils.py` | Shared utilities | Logging, validation, formatting |
+| `data_prep.py` | Data loading & preparation | Load, explore, validate, preprocess |
+| `imputation.py` | Missing data handling | Median & KNN imputation |
+| `model_training.py` | Model training & CV | Nested CV, hyperparameter tuning, caching |
+| `evaluation.py` | Performance evaluation | Metrics, reports, visualizations |
+| `ml_pipeline.py` | Main orchestrator | Coordinates all steps |
 
 ---
 
-## Quick Start
+## Data Preparation
 
-### 1. Run the Complete Pipeline
+Data preparation handles loading, exploration, validation, and preprocessing of raw data.
 
-```bash
-cd working/scripts/ml-pipeline
-python ml_pipeline.py
-```
+### Module: `data_prep.py`
 
-This single command orchestrates the entire workflow:
-- Data loading and validation
-- Feature preprocessing
-- Nested 5-fold CV training for Elastic Net and Random Forest
-- Hyperparameter tuning for both models
-- Comprehensive performance evaluation
-- Final model refitting on full data
-- Report generation and visualization
+#### Function: `prepare_pipeline_data()`
 
-### 2. Run Components Individually
+Main entry point for data preparation.
 
-If you prefer to execute steps separately:
-
-```bash
-# Step 1: Data preparation
-python data_prep.py
-
-# Step 2: Model training
-python model_training.py
-
-# Step 3: Evaluation and reporting
-python evaluation.py
-```
-
----
-
-## Architecture & Components
-
-### File Structure
-
-```
-scripts/ml-pipeline/
-├── config.py                 # Configuration and constants
-├── utils.py                  # Utility functions (logging, validation, helpers)
-├── data_prep.py              # Data loading and preprocessing
-├── model_training.py         # Nested CV with Elastic Net and Random Forest
-├── evaluation.py             # Metrics, reporting, visualization
-├── ml_pipeline.py            # Main orchestration script
-└── requirements.txt          # Python dependencies (optional)
-
-results/
-├── models/                   # Saved model objects (elastic_net_final.pkl, etc.)
-├── reports/                  # JSON reports and CSV summaries
-└── logs/                     # Timestamped log files
-```
-
----
-
-## Component Details
-
-### 1. Configuration (`config.py`)
-
-**Purpose**: Centralized settings for reproducibility and path management
-
-**Key Settings**:
-- **Paths**: Project structure, data, results directories
-- **Random Seed**: `RANDOM_SEED = 42` (for reproducibility)
-- **Cross-Validation**: Outer 5-fold, Inner 5-fold
-- **Hyperparameter Grids**: Search spaces for Elastic Net and Random Forest
-- **Feature Groups**: Definitions for clinical vs. gene expression variables
-
-**Key Classes/Functions**:
-- Configuration variables for reproducibility
-- Centralized hyperparameter definitions
-
-### 2. Utilities (`utils.py`)
-
-**Purpose**: Common helper functions for validation, logging, and evaluation
-
-**Key Functions**:
-- `setup_logging()`: Configure logging to file and console
-- `validate_target_variable()`: Check target is binary, no missing values
-- `assess_class_imbalance()`: Evaluate whether stratified CV is needed
-- `get_feature_groups()`: Separate clinical and gene expression features
-- `format_cv_results()`: Format CV scores for reporting
-
-**Usage Pattern**:
+**Signature**:
 ```python
-from utils import setup_logging, validate_target_variable
-
-logger = setup_logging('my_script')
-is_valid, report = validate_target_variable(df, 'e.tdm')
+def prepare_pipeline_data(
+    filepath=DATA_FILE,
+    target_column=TARGET_COLUMN,
+    time_column=TIME_COLUMN
+)
 ```
 
-### 3. Data Preparation (`data_prep.py`)
-
-**Purpose**: Load, explore, validate, and preprocess data
-
-**Workflow**:
-
-```
-1. Load data from CSV
-↓
-2. Explore data structure and statistics
-↓
-3. Validate target variable (binary, no missing values)
-↓
-4. Check feature coverage and class imbalance
-↓
-5. Encode categorical variables (er, grade)
-↓
-6. Scale continuous features (StandardScaler)
-↓
-7. Return preprocessed X, y matrices
-```
-
-**Key Functions**:
-- `load_data()`: Load CSV into DataFrame
-- `explore_data()`: Generate basic statistics and structure info
-- `validate_data()`: Comprehensive data quality checks
-- `preprocess_features()`: Encode categorical, scale continuous features
-- `prepare_pipeline_data()`: End-to-end data preparation
-
-**Output**:
+**Returns**: Dictionary with:
 ```python
-data = prepare_pipeline_data()
-# data['X']: Preprocessed feature matrix (200 × 80)
-# data['y']: Binary target variable (200 samples)
-# data['feature_groups']: Separated clinical and gene features
-# data['encoders']: Fitted categorical encoders
-# data['scaler']: Fitted StandardScaler object
-```
-
-**Data Specifications**:
-- **Input**: `breast_cancer_survival.csv` (200 × 83)
-- **Target**: `e.tdm` (binary TRUE/FALSE)
-- **Clinical Features**: age, er (categorical), grade (categorical), size
-- **Gene Expression**: 76 features prefixed with 'X'
-- **Output**: Concatenated X (200 × 80), y (200)
-
-### 4. Model Training (`model_training.py`)
-
-**Purpose**: Implement nested cross-validation with two models and hyperparameter tuning
-
-**Architecture**:
-
-```
-OUTER CV LOOP (5 folds)  ← Performance Estimation
-│
-├─ Fold 1 (train: 160, test: 40)
-│  │
-│  └─ INNER CV LOOP (5 folds)  ← Hyperparameter Optimization
-│     │
-│     ├─ GridSearch over hyperparameter space
-│     └─ Report best parameters
-│
-├─ Fold 2 (train: 160, test: 40)
-│  └─ ... (repeat inner CV)
-│
-... (Folds 3-5)
-│
-└─ Final Model: Retrain on full data (200 samples) with best parameters
-```
-
-**Key Class**: `NestedCVTrainer`
-
-**Methods**:
-- `train_elastic_net()`: Nested CV for LogisticRegression with elasticnet penalty
-- `train_random_forest()`: Nested CV for RandomForestClassifier
-
-**Model Specifications**:
-
-**Elastic Net (L1 + L2 Regularization)**:
-- Implementation: `LogisticRegression(penalty='elasticnet', solver='saga')`
-- Hyperparameters to tune:
-  - `alpha`: Regularization strength [0.0001, 0.001, 0.01, 0.1, 1.0]
-  - `l1_ratio`: L1 fraction [0.1, 0.3, 0.5, 0.7, 0.9]
-- Best for: Interpretable coefficients, balanced regularization
-
-**Random Forest**:
-- Implementation: `RandomForestClassifier` with balanced class weights
-- Hyperparameters to tune:
-  - `n_estimators`: Number of trees [50, 100, 200]
-  - `max_depth`: Maximum tree depth [5, 10, 15, 20, None]
-  - `min_samples_split`: Min samples to split [2, 5, 10]
-  - `min_samples_leaf`: Min samples per leaf [1, 2, 4]
-- Best for: Automatic feature interactions, feature importance
-
-**Output**:
-```python
-results = run_full_pipeline(X, y)
-
-# results['elastic_net']:
-#   - cv_scores: Per-fold AUC scores
-#   - mean_score, std_score: Mean AUC and standard deviation
-#   - best_params: Best hyperparameters found
-#   - final_model: Refitted model on full data
-
-# results['random_forest']: (same structure)
-# results['best_model_name']: 'Elastic Net' or 'Random Forest'
-```
-
-**Computational Cost**:
-- Total model trainings: 250 per metric
-  - Outer folds: 5
-  - Inner CV folds: 5 per outer fold
-  - Hyperparameter combinations: Each model tested with multiple combinations
-  - Expected runtime: 2-5 minutes on standard machine
-
-### 5. Evaluation & Reporting (`evaluation.py`)
-
-**Purpose**: Calculate metrics, generate reports, create visualizations
-
-**Key Class**: `ModelEvaluator`
-
-**Metrics Calculated**:
-- **Primary**: Mean CV ROC-AUC with standard deviation
-- **Secondary**: 
-  - Per-fold ROC-AUC scores
-  - Accuracy, Precision, Recall, F1-score (if needed)
-  - Feature importance (Random Forest)
-  - Model coefficients (Elastic Net)
-
-**Reports Generated**:
-
-1. **JSON Report** (`model_evaluation_report.json`):
-   ```json
-   {
-     "best_model": "Random Forest",
-     "cv_summary": {
-       "Elastic Net": {
-         "mean_auc": 0.8432,
-         "std_auc": 0.0456,
-         "best_params": {...}
-       },
-       "Random Forest": {...}
-     },
-     "fold_scores": {...},
-     "final_model_parameters": {...}
-   }
-   ```
-
-2. **CSV Summary** (`cv_summary.csv`):
-   - Comparison table of both models
-   - Mean AUC, Std AUC, Min/Max scores
-   - Best hyperparameters
-
-3. **Visualizations**:
-   - `cv_scores_comparison.png`: Per-fold CV scores with error bands
-   - `model_comparison.png`: Bar plot of mean AUCs with error bars
-
-**Key Methods**:
-- `generate_cv_summary()`: Summary table of both models
-- `get_final_model_parameters()`: Extract final model hyperparameters and coefficients
-- `plot_cv_scores()`: Visualization of fold-by-fold performance
-- `plot_model_comparison()`: Model comparison chart
-- `save_report_to_json()`: Export full report
-- `save_summary_to_csv()`: Export summary table
-
-### 6. Main Orchestration (`ml_pipeline.py`)
-
-**Purpose**: Coordinate all pipeline steps and provide unified interface
-
-**Workflow**:
-```
-1. Data preparation
-2. Model training (nested CV)
-3. Evaluation and reporting
-4. Print summary and save all outputs
-```
-
-**Key Function**: `main()`
-- Executes the complete pipeline
-- Provides formatted console output
-- Handles errors gracefully
-- Logs all activities
-
----
-
-## Understanding the Nested Cross-Validation
-
-### Why Nested CV?
-
-The nested cross-validation architecture is essential for honest performance estimation:
-
-**Without Nested CV (❌ Biased)**:
-```
-GridSearchCV finds best params on entire dataset
-    ↓
-Evaluate performance on same data
-    ↓
-Result: Overly optimistic performance estimates
-```
-
-**With Nested CV (✓ Unbiased)**:
-```
-Outer CV: Hold out test fold
-├─ Inner CV: Tune hyperparameters on training folds
-├─ Evaluate best model on held-out fold
-└─ Return honest performance estimate
-Repeat for all outer folds → Average the estimates
-```
-
-### What Happens in Each Loop
-
-**Outer Loop Purpose**: Generate honest estimate of model generalization
-- Splits data into 5 non-overlapping folds
-- For each fold: treat as test set
-- Returns 5 performance scores (one per fold)
-- Final metric: **Mean of 5 fold scores ± Standard deviation**
-
-**Inner Loop Purpose**: Find best hyperparameters without bias
-- Within outer training fold: perform 5-fold CV
-- GridSearch tests all hyperparameter combinations
-- Selects best params based on validation performance
-- Prevents leakage from tuning affecting outer fold evaluation
-
-### Example Execution
-
-For **Outer Fold 1 of Elastic Net**:
-```
-Hold out test set: 40 samples (20% of 200)
-Use 160 samples for tuning
-
-Inner CV (on 160 samples):
-├─ Fold 1 train: 128, test: 32
-├─ Fold 2 train: 128, test: 32
-├─ Fold 3 train: 128, test: 32
-├─ Fold 4 train: 128, test: 32
-└─ Fold 5 train: 128, test: 32
-
-Test all 25 combinations of alpha × l1_ratio
-    → GridSearchCV averages inner fold scores
-    → Selects best combo (e.g., alpha=0.01, l1_ratio=0.5)
-
-Retrain on full 160 with best params
-Evaluate on held-out 40
-    → Report: AUC = 0.862
-
-Repeat for Outer Folds 2-5
-    → Final: Mean AUC = 0.843 ± 0.045
-```
-
----
-
-## Reproducibility & Best Practices
-
-### 1. Random Seed Management
-```python
-# All components use RANDOM_SEED = 42
-np.random.seed(42)
-RandomForestClassifier(random_state=42)
-StratifiedKFold(random_state=42)
-```
-
-### 2. Data Leakage Prevention
-- Feature scaling happens **within CV loops** (inside training fold)
-- Hyperparameter tuning uses **inner CV only** (no info from outer test fold)
-- Final model retraining uses **full data** after CV evaluation (separate step)
-
-### 3. Configuration-Driven Approach
-```python
-# All settings in config.py → easy to modify without code changes
-N_SPLITS_OUTER = 5
-ELASTIC_NET_PARAMS = {...}
-RANDOM_SEED = 42
-```
-
-### 4. Comprehensive Logging
-- All steps logged to timestamped files in `results/logs/`
-- Console output for immediate feedback
-- Useful for auditing and debugging
-
-### 5. Model Serialization
-```python
-# Final models saved after CV for later use
-import joblib
-model = joblib.load('results/models/elastic_net_final.pkl')
-predictions = model.predict(X_new)
-```
-
----
-
-## Expected Performance
-
-### Typical Results on Test Data
-
-| Model | Mean CV AUC | Std AUC | Runtime |
-|-------|-------------|---------|---------|
-| Elastic Net | 0.82-0.86 | 0.03-0.05 | 30-60s |
-| Random Forest | 0.84-0.88 | 0.02-0.04 | 90-120s |
-
-*Note: Exact values depend on data and random seed*
-
-### Interpreting Results
-
-- **Mean AUC**: 0.5 = random, 1.0 = perfect classifier
-- **Std AUC**: Lower is better (stable across folds)
-- **Best Model**: Usually Random Forest for this dataset (captures gene interaction effects)
-
----
-
-## Customization Guide
-
-### Modify Hyperparameter Search Space
-
-In `config.py`:
-```python
-ELASTIC_NET_PARAMS = {
-    'alpha': [0.001, 0.01, 0.1],      # Add/remove values
-    'l1_ratio': [0.3, 0.7]             # Adjust range
+{
+    'X': pd.DataFrame,                 # Features
+    'y': pd.Series,                    # Target
+    'feature_groups': dict,            # Feature classification
+    'original_feature_names': list,    # Original names
+    'transformed_feature_names': list, # After encoding
+    'encoders': dict,                  # Categorical encoders
+    'validation_report': dict          # Validation results
 }
 ```
 
-### Change Number of CV Folds
-
-In `config.py`:
+**Example**:
 ```python
-N_SPLITS_OUTER = 10  # Instead of 5 (slower but more robust)
-N_SPLITS_INNER = 3   # Instead of 5 (faster but less thorough)
+from data_prep import prepare_pipeline_data
+
+data = prepare_pipeline_data()
+X = data['X']
+y = data['y']
 ```
 
-### Add Additional Metrics
+#### Function: `explore_data(df)`
 
-In `evaluation.py`:
+Generate exploratory statistics about dataset.
+
+#### Function: `validate_data(df, target_column)`
+
+Perform comprehensive data validation checks.
+
+---
+
+## Imputation Strategies
+
+Handles missing data using different imputation approaches within sklearn Pipeline framework.
+
+### Module: `imputation.py`
+
+#### Class: `MissingnessAnalyzer`
+
+Analyzes missing data patterns.
+
+**Methods**:
+
+##### `assess_missingness(X) → dict`
+
+Calculate missing value statistics.
+
+**Example**:
 ```python
-def _create_scorers(self):
-    scorers = {
-        ...existing metrics...
-        'precision_macro': make_scorer(precision_score, average='macro'),
-        'roc_curve': make_scorer(roc_auc_score)  # Custom metrics
-    }
-    return scorers
+from imputation import MissingnessAnalyzer
+
+analysis = MissingnessAnalyzer.assess_missingness(X)
+print(f"Total missing: {analysis['total_missing_values']}")
 ```
 
-### Use Different Feature Scaling
+#### Class: `MedianImputationTransformer`
 
-In `data_prep.py`:
+Custom scikit-learn transformer for median/mode imputation.
+
+**Purpose**: Impute missing values fitted only on training data to prevent leakage.
+
+**Usage in sklearn Pipeline**:
 ```python
-from sklearn.preprocessing import RobustScaler
-scaler = RobustScaler()  # Instead of StandardScaler
-X[continuous_cols] = scaler.fit_transform(X[continuous_cols])
+from imputation import MedianImputationTransformer
+from sklearn.pipeline import Pipeline
+
+pipeline = Pipeline([
+    ('impute', MedianImputationTransformer()),
+    ('scale', StandardScaler()),
+    ('clf', LogisticRegression())
+])
+
+pipeline.fit(X_train, y_train)
+predictions = pipeline.predict(X_test)
+```
+
+#### Function: `get_imputation_transformer(strategy)`
+
+Get the appropriate transformer.
+
+**Parameters**: `strategy` ∈ {'median', 'knn'}
+
+---
+
+## Model Training
+
+Implements nested cross-validation with hyperparameter tuning and model caching.
+
+### Module: `model_training.py`
+
+#### Function: `run_full_pipeline(X, y, imputation_strategy='median')`
+
+Trains both models with nested cross-validation.
+
+**Signature**:
+```python
+def run_full_pipeline(
+    X,
+    y,
+    imputation_strategy='median'
+) -> dict
+```
+
+**Returns**: Dictionary with results:
+```python
+{
+    'elastic_net': {
+        'model_name': str,
+        'mean_score': float,           # Mean CV AUC
+        'std_score': float,            # Std CV AUC
+        'cv_scores': np.ndarray,       # Per-fold scores
+        'best_params': dict,           # Hyperparameters
+        'best_model': estimator,       # Best model
+        'final_model': Pipeline,       # Fit on full data
+        'imputation_strategy': str
+    },
+    'random_forest': {...},
+    'best_model_name': str,            # 'Elastic Net' or 'Random Forest'
+    'feature_names': list,
+    'transformed_feature_names': list,
+    'imputation_strategy': str
+}
+```
+
+**Example**:
+```python
+from model_training import run_full_pipeline
+
+results = run_full_pipeline(X, y, imputation_strategy='median')
+
+print(f"Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f}")
+print(f"Random Forest CV AUC: {results['random_forest']['mean_score']:.4f}")
+```
+
+#### Function: `check_cached_models_exist(strategies=None) → dict`
+
+Check if trained model results are cached.
+
+**Example**:
+```python
+cache_status = check_cached_models_exist()
+for strategy, exists in cache_status.items():
+    print(f"{strategy}: {'✓ Found' if exists else '✗ Not found'}")
+```
+
+#### Function: `load_cached_training_results(strategy) → dict or None`
+
+Load previously trained model results from cache.
+
+#### Function: `save_training_results(results, strategy)`
+
+Save training results to cache.
+
+---
+
+## Evaluation & Reporting
+
+Calculates performance metrics and generates comprehensive reports.
+
+### Module: `evaluation.py`
+
+#### Class: `ModelEvaluator`
+
+Comprehensive model evaluator with metrics and reporting.
+
+**Initialization**:
+```python
+evaluator = ModelEvaluator(
+    model_results_dict,
+    feature_names=None
+)
+```
+
+#### Methods
+
+##### `generate_cv_summary() → pd.DataFrame`
+
+Generate summary statistics from cross-validation.
+
+**Example**:
+```python
+evaluator = ModelEvaluator(results)
+summary = evaluator.generate_cv_summary()
+print(summary.to_string())
+```
+
+##### `get_final_model_parameters() → dict`
+
+Extract final model parameters and coefficients.
+
+##### `plot_cv_scores() → plt.Figure`
+
+Line plot of per-fold performance.
+
+##### `plot_model_comparison() → plt.Figure`
+
+Bar chart comparing model AUC.
+
+#### Class: `ConsolidatedReportGenerator`
+
+Generates consolidated reports across multiple imputation strategies.
+
+#### Function: `generate_full_evaluation_report(model_results_dict)`
+
+Main evaluation entry point.
+
+**Example**:
+```python
+from evaluation import generate_full_evaluation_report
+
+results = run_full_pipeline(X, y)
+report = generate_full_evaluation_report(results)
 ```
 
 ---
 
-## Output Files Reference
+## Configuration
 
-### Model Files
-- `results/models/elastic_net_final.pkl`: Final Elastic Net model
-- `results/models/random_forest_final.pkl`: Final Random Forest model
+All settings centralized in `config.py` and loaded from `config.yml`.
 
-### Report Files
-- `results/reports/model_evaluation_report.json`: Complete evaluation report
-- `results/reports/cv_summary.csv`: Summary statistics table
-- `results/reports/cv_scores_comparison.png`: Per-fold comparison plot
-- `results/reports/model_comparison.png`: Model performance comparison
+### Module: `config.py`
 
-### Log Files
-- `results/logs/ml_pipeline_main_*.log`: Main pipeline execution log
-- `results/logs/data_prep_*.log`: Data preparation log
-- `results/logs/model_training_*.log`: Model training log
-- `results/logs/evaluation_*.log`: Evaluation log
+#### File Paths
 
----
+```python
+PROJECT_PATH = config['default']['project']
+DATA_DIR = os.path.join(PROJECT_PATH, 'data')
+DATA_FILE = os.path.join(DATA_DIR, 'breast_cancer_survival_with_missingness.csv')
+RESULTS_DIR = os.path.join(PROJECT_PATH, 'results')
+MODELS_DIR = os.path.join(RESULTS_DIR, 'models')
+REPORTS_DIR = os.path.join(RESULTS_DIR, 'reports')
+LOGS_DIR = os.path.join(RESULTS_DIR, 'logs')
+```
 
-## Troubleshooting
+#### Reproducibility
 
-### Issue: "Config file not found"
-**Solution**: Ensure script is run from `scripts/ml-pipeline/` directory:
+```python
+RANDOM_SEED = 42  # Set across numpy, sklearn, etc.
+```
+
+#### Cross-Validation Settings
+
+```python
+N_SPLITS_OUTER = 5      # Outer CV folds
+N_SPLITS_INNER = 5      # Inner CV folds
+STRATIFIED_CV = True    # Preserve class distribution
+```
+
+#### Computational Settings
+
+```python
+N_JOBS = -1             # -1 = all cores, N = use N cores
+```
+
+#### Model Hyperparameters
+
+```python
+ELASTIC_NET_PARAMS = {
+    'C': [0.01, 0.1, 1.0, 10.0, 100.0],
+    'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9]
+}
+
+RANDOM_FOREST_PARAMS = {
+    'n_estimators': [50, 100, 200],
+    'max_depth': [5, 10, 15, 20, None],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
+```
+
+#### Feature Columns
+
+```python
+TARGET_COLUMN = 'e.tdm'     # Binary outcome
+TIME_COLUMN = 't.tdm'       # Survival time (reference)
+```
+
+### Modifying Configuration
+
+#### Approach 1: Edit `config.py` directly
+
+```python
+N_SPLITS_OUTER = 3          # Speed up
+ELASTIC_NET_PARAMS = {      # Reduce search space
+    'C': [0.1, 1.0, 10.0],
+    'l1_ratio': [0.3, 0.7]
+}
+```
+
+#### Approach 2: Command-line Overrides
+
 ```bash
-cd working/scripts/ml-pipeline
-python ml_pipeline.py
+python ml_pipeline.py --dataset my_data.csv --target-column outcome
 ```
 
-### Issue: Low cross-validation scores (AUC < 0.6)
-**Possible causes**:
-- Dataset too small or too noisy
-- Features lack predictive power
-- Try feature engineering or selection
-- Check class imbalance ratio
+#### Approach 3: Programmatic
 
-### Issue: Runs very slowly
-**Solutions**:
-- Reduce `N_SPLITS_INNER` to 3 (from 5)
-- Reduce hyperparameter grid sizes
-- Set `N_JOBS=-1` to use all cores (already default)
+```python
+import config
+config.N_SPLITS_OUTER = 3
+results = run_full_pipeline(X, y)
+```
 
 ---
 
-## Next Steps
+## Advanced Usage
 
-### To Use Models for Prediction
+### Custom Dataset with Different Column Names
+
+```bash
+python ml_pipeline.py \
+    --dataset my_patients.csv \
+    --target-column survival_event \
+    --time-column followup_months
+```
+
+### Re-train All Models from Scratch
+
+```bash
+python ml_pipeline.py --retrain
+```
+
+### Extract and Use Trained Model
 
 ```python
 import joblib
-from data_prep import preprocess_features
+import pandas as pd
+from sklearn.metrics import roc_auc_score
 
 # Load trained model
 model = joblib.load('results/models/random_forest_final.pkl')
 
-# Preprocess new data (use same encoders/scaler)
-X_new, y_new, _, encoders, scaler = preprocess_features(df_new)
+# Load new data
+new_data = pd.read_csv('new_patients.csv')
 
 # Make predictions
-predictions = model.predict(X_new)
-probabilities = model.predict_proba(X_new)
+predictions = model.predict(new_data)
+probabilities = model.predict_proba(new_data)[:, 1]
+
+# Evaluate if labels available
+labels = pd.read_csv('labels.csv')['outcome']
+auc = roc_auc_score(labels, probabilities)
+print(f"AUC: {auc:.4f}")
 ```
 
-### To Evaluate on External Test Set
+### Programmatic Pipeline Execution
 
 ```python
-from sklearn.metrics import roc_auc_score, classification_report
+import sys
+sys.path.insert(0, '/path/to/ml-pipeline/working/scripts/ml-pipeline')
 
-# Load model and generate predictions
-y_pred_proba = model.predict_proba(X_test)[:, 1]
-auc_score = roc_auc_score(y_test, y_pred_proba)
-print(classification_report(y_test, y_pred > 0.5))
-```
+from data_prep import prepare_pipeline_data
+from model_training import run_full_pipeline
+from evaluation import generate_full_evaluation_report
 
-### To Compare with Baseline Models
+# Step 1: Prepare data
+data = prepare_pipeline_data('data/cancer.csv')
+X = data['X']
+y = data['y']
 
-```python
-# Add to model_training.py:
-from sklearn.dummy import DummyClassifier
+# Step 2: Train models
+all_results = {}
+for strategy in ['median', 'knn']:
+    print(f"Training with {strategy} imputation...")
+    results = run_full_pipeline(X, y, imputation_strategy=strategy)
+    all_results[strategy] = results
 
-baseline = DummyClassifier(strategy='stratified')
-# Train and evaluate with same nested CV framework
+# Step 3: Report results
+for strategy, results in all_results.items():
+    print(f"\n{strategy.upper()} Results:")
+    print(f"  Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f}")
+    print(f"  Random Forest CV AUC: {results['random_forest']['mean_score']:.4f}")
 ```
 
 ---
 
-## Summary
+## Understanding Cross-Validation
 
-This pipeline provides:
-- ✓ Reproducible nested CV framework
-- ✓ Two complementary models (linear + tree-based)
-- ✓ Honest hyperparameter tuning
-- ✓ Comprehensive performance metrics
-- ✓ Final models refitted on full data
-- ✓ Detailed reporting and visualization
-- ✓ Production-ready code structure
-- ✓ Complete logging for auditability
+### Nested Cross-Validation
 
-All components are modular and can be used independently or extended for future model types and datasets.
+The pipeline uses **nested CV** for valid performance estimates:
+
+```
+OUTER CV LOOP (Honest Estimation)
+│
+├─ Fold 1:
+│  ├─ Training set: 80% of data
+│  │  └─ INNER CV LOOP (Hyperparameter Tuning)
+│  │     └─ Grid search over parameters
+│  │     └─ Return best parameters
+│  ├─ Test set: 20% of data
+│  └─ Evaluate with best params → AUC₁
+│
+├─ Fold 2-5: Repeat above
+│  └─ AUC₂, AUC₃, AUC₄, AUC₅
+│
+└─ Report mean ± std across folds
+```
+
+**Why two levels?**
+- Inner CV finds best hyperparameters safely
+- Outer CV estimates unbiased generalization
+- Single CV would overestimate performance
+
+### Data Leakage Prevention
+
+All preprocessing fitted on training data only:
+
+```
+For each outer CV fold:
+  1. Split into train + test
+  2. Fit imputation on TRAINING set only
+  3. Apply to test set
+  4. Fit scaling on TRAINING set only
+  5. Apply to test set
+  6. Train model on scaled training data
+  7. Evaluate on scaled test data
+```
+
+---
+
+## Troubleshooting & Performance Tips
+
+### Pipeline Takes Too Long
+
+1. **Use cached models** (default):
+   ```bash
+   python ml_pipeline.py
+   ```
+
+2. **Reduce CV splits**:
+   ```python
+   # config.py
+   N_SPLITS_OUTER = 3
+   N_SPLITS_INNER = 3
+   ```
+
+3. **Reduce hyperparameter grid**:
+   ```python
+   # config.py
+   ELASTIC_NET_PARAMS = {
+       'C': [0.1, 1.0, 10.0],
+       'l1_ratio': [0.3, 0.7]
+   }
+   ```
+
+4. **Limit CPU cores**:
+   ```python
+   # config.py
+   N_JOBS = 4  # Use 4 cores instead of all
+   ```
+
+### Out of Memory
+
+```python
+# config.py
+N_JOBS = 2  # Fewer parallel processes
+```
+
+### Inconsistent Results
+
+Check `RANDOM_SEED` in `config.py`:
+```python
+RANDOM_SEED = 42  # Ensures reproducibility
+```
+
+### Model Performance Low
+
+1. Check class imbalance in logs
+2. Verify feature quality 
+3. Try different imputation strategies
+4. Expand hyperparameter grid
+
+---
+
+## Logging and Debugging
+
+### Log Files Location
+
+```
+results/logs/
+├── ml_pipeline_main_*.log      # Main orchestrator
+├── data_prep_*.log             # Data preparation
+├── model_training_*.log        # Training details
+└── evaluation_*.log            # Evaluation
+```
+
+### Reading Logs
+
+```bash
+# Last 50 lines
+tail -50 results/logs/model_training_*.log
+
+# Watch in real-time
+tail -f results/logs/ml_pipeline_main_*.log
+
+# Search for errors
+grep ERROR results/logs/*.log
+```
+
+### Increase Verbosity
+
+```python
+# config.py
+LOG_LEVEL = 'DEBUG'  # More detailed logging
+```
+
+---
+
+## API Reference Summary
+
+### Main Entry Points
+
+| Function | Module | Purpose |
+|----------|--------|---------|
+| `prepare_pipeline_data()` | data_prep | Load & prepare data |
+| `run_full_pipeline()` | model_training | Train & evaluate models |
+| `generate_full_evaluation_report()` | evaluation | Generate reports |
+
+### Key Classes
+
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `MissingnessAnalyzer` | imputation | Analyze missing data |
+| `MedianImputationTransformer` | imputation | Imputation transformer |
+| `ModelEvaluator` | evaluation | Evaluate models |
+| `ConsolidatedReportGenerator` | evaluation | Cross-strategy comparisons |
+
+---
+
+## References
+
+- scikit-learn: https://scikit-learn.org/stable/
+- Nested CV: https://scikit-learn.org/stable/modules/cross_validation.html
+- SHAP: https://shap.readthedocs.io/
+- Scikit-Survival: https://scikit-survival.readthedocs.io/
+
+For additional help, check log files in `results/logs/` after running the pipeline.

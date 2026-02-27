@@ -82,4 +82,16 @@ Goal: to include shapley value feature importance plots for the final pipeline m
 
 Currently, the consolidated report includes nice summaries/rankings of feature importance of all the resulting modals. However, the pipeline currently uses the model's internal feature importance metrics for this - e.g. coefficients for elastic net and rf variable importance. However, I would like a modal agnostic summary of the feature importance of each model included in the pipeline result report by default
 
+## 
 
+Goal: I want to update the documentation of the pipeline so that it clearly and concisely describes the opperation of the pipeline for new users.
+
+Currently, many intermediate documentation files have accumulated as the pipeline has been built. These have be consolidated in the 'docs/' directory. Because these have been produced incrementally, the don't necessarily reflect the full, and final operation of the pipeline
+
+One exception is the 'my-prompts.md' file where I'm saving my prompt text. Please leave this file as is. 
+
+Specifically, I would you consider these 'docs/' and (more importantly) the current function and implementation of the pipeline and create an up to date documentation of the pipeline. I would like that documentation to be delivered in the format of 3 files:
+
+1) a SETUP.md file which describes how a new user would setup their compute environment to be able to run the environment (assuming that all software management will be performed by creation of a  mamba enviroment)
+2) a short QUICK_GUIDE.md with a brief introduction to the pipelines basic functions
+2) a more verbose IMPLEMENTATION_GUIDE.md with the more complete documenation of the relevant pipeline functions. 
