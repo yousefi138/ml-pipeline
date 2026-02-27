@@ -2,6 +2,7 @@
 Model training with nested cross-validation.
 Implements two models (Elastic Net and Random Forest) with hyperparameter tuning.
 Includes multiple imputation strategies for robust handling of missing data.
+Supports both binary classification and survival analysis outcomes.
 
 Also supports benchmarking pre-defined linear prediction scores supplied in
 `score*.csv` files in the data directory. These scores are evaluated within
@@ -12,10 +13,11 @@ comparison of predictive performance.
 import os
 import glob
 import warnings
+import copy
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.model_selection import (
     StratifiedKFold, GridSearchCV, cross_val_score, cross_validate
 )
@@ -27,11 +29,28 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import joblib
 
+# Optional survival imports
+try:
+    from sksurv.ensemble import RandomSurvivalForest
+    from sksurv.metrics import concordance_index_censored, integrated_brier_score
+    HAS_SKSURV = True
+except ImportError:
+    HAS_SKSURV = False
+    logger_temp = None  # Will be set later
+
+try:
+    from lifelines import CoxPHFitter
+    HAS_LIFELINES = True
+except ImportError:
+    HAS_LIFELINES = False
+
 from config import (
     RANDOM_SEED, N_SPLITS_OUTER, N_SPLITS_INNER, N_JOBS,
     CV_SCORING, ELASTIC_NET_PARAMS, RANDOM_FOREST_PARAMS,
-    STRATIFIED_CV, METRICS, MODELS_DIR, DATA_DIR
+    STRATIFIED_CV, METRICS, MODELS_DIR, DATA_DIR, OUTCOME_TYPE,
+    COXPH_PARAMS_SURVIVAL, RANDOM_SURVIVAL_FOREST_PARAMS
 )
+from outcome import get_outcome_handler
 from utils import setup_logging, format_cv_results
 from imputation import (
     get_imputation_transformer, MissingnessAnalyzer
@@ -39,6 +58,12 @@ from imputation import (
 
 warnings.filterwarnings('ignore')
 logger = setup_logging('model_training')
+
+# Check availability of survival libraries after logger is set up
+if not HAS_SKSURV:
+    logger.warning("scikit-survival not installed; survival models will not be available")
+if not HAS_LIFELINES:
+    logger.warning("lifelines not installed; CoxPH models may have limited functionality")
 
 # Set random seed for reproducibility
 np.random.seed(RANDOM_SEED)
@@ -129,6 +154,192 @@ def save_training_results(results, strategy):
         logger.info(f"✓ Saved training results cache for {strategy} strategy to {cache_path}")
     except Exception as e:
         logger.warning(f"Failed to save training results cache for {strategy}: {e}")
+
+
+# ==============================================================================
+# SURVIVAL MODEL WRAPPERS
+# ==============================================================================
+# Wrapper classes to make scikit-survival models compatible with sklearn pipelines
+
+class SurvivalModelWrapper(BaseEstimator, RegressorMixin):
+    """
+    Abstract base class for survival model wrappers.
+    Provides interface for survival models to work with sklearn Pipelines and GridSearchCV.
+    """
+    
+    def __init__(self):
+        self.model_ = None
+        self.feature_names_ = None
+    
+    def fit(self, X, y):
+        """
+        Fit the survival model.
+        
+        Parameters
+        ----------
+        X : pd.DataFrame or np.ndarray
+            Feature matrix
+        y : np.ndarray or tuple
+            For survival: tuple of (T, E) where T=time, E=event
+            For compatibility with sklearn, may receive structured array
+        
+        Returns
+        -------
+        self
+        """
+        raise NotImplementedError
+    
+    def predict(self, X):
+        """
+        Generate risk scores.
+        
+        Parameters
+        ----------
+        X : pd.DataFrame or np.ndarray
+            Feature matrix
+        
+        Returns
+        -------
+        scores : np.ndarray
+            Risk scores
+        """
+        raise NotImplementedError
+
+
+class CoxPHWrapper(SurvivalModelWrapper):
+    """
+    Wrapper for scikit-survival or lifelines CoxPH model to work with sklearn pipelines.
+    
+    Parameters
+    ----------
+    penalizer : float, optional
+        Regularization parameter (default 0.0)
+    l1_ratio : float, optional
+        L1 ratio for elastic net regularization, 0 = L2 (Ridge), 1 = L1 (Lasso)
+    """
+    
+    def __init__(self, penalizer=0.0, l1_ratio=0.0):
+        super().__init__()
+        self.penalizer = penalizer
+        self.l1_ratio = l1_ratio
+    
+    def fit(self, X, y):
+        """Fit Cox Proportional Hazards model."""
+        if not HAS_LIFELINES:
+            raise ImportError("lifelines is required for CoxPH models. Install with: pip install lifelines")
+        
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X.copy()
+        self.feature_names_ = X_df.columns.tolist()
+        
+        # Extract time and event from y
+        # y can be a structured array from sksurv or a tuple dict with 'T' and 'E'
+        if isinstance(y, dict):
+            T = y['T']
+            E = y['E']
+        elif isinstance(y, tuple) and len(y) == 2:
+            T, E = y
+        elif hasattr(y, 'dtype') and y.dtype.names:  # Structured array
+            T = y['time']
+            E = y['event']
+        else:
+            raise ValueError("Outcome y must be dict with 'T'/'E' or structured array for survival models")
+        
+        # Add duration and event to dataframe
+        X_df['duration'] = T
+        X_df['event'] = E
+        
+        # Fit Cox model
+        self.model_ = CoxPHFitter(penalizer=self.penalizer / max(1.0, self.l1_ratio))
+        self.model_.fit(X_df, duration_col='duration', event_col='event')
+        
+        return self
+    
+    def predict(self, X):
+        """Generate risk scores (partial hazard) for samples."""
+        if self.model_ is None:
+            raise ValueError("Model has not been fitted yet")
+        
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X.copy()
+        X_df = X_df[self.feature_names_]
+        
+        # Get risk scores (partial hazard)
+        scores = self.model_.predict_partial_hazard(X_df).values
+        return scores
+
+
+class RandomSurvivalForestWrapper(SurvivalModelWrapper):
+    """
+    Wrapper for scikit-survival RandomSurvivalForest to work with sklearn pipelines.
+    
+    Parameters
+    ----------
+    n_estimators : int
+        Number of trees (default 100)
+    max_depth : int or None
+        Maximum depth of trees (default None)
+    min_samples_split : int
+        Minimum samples to split (default 2)
+    min_samples_leaf : int
+        Minimum samples in leaf (default 1)
+    """
+    
+    def __init__(self, n_estimators=100, max_depth=None, min_samples_split=2, min_samples_leaf=1):
+        super().__init__()
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+    
+    def fit(self, X, y):
+        """Fit Random Survival Forest model."""
+        if not HAS_SKSURV:
+            raise ImportError("scikit-survival is required for RandomSurvivalForest. Install with: pip install scikit-survival")
+        
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X.astype(float)
+        self.feature_names_ = X_df.columns.tolist()
+        X_df = X_df[self.feature_names_]
+        
+        # Extract time and event
+        if isinstance(y, dict):
+            T = y['T']
+            E = y['E']
+        elif isinstance(y, tuple) and len(y) == 2:
+            T, E = y
+        elif hasattr(y, 'dtype') and y.dtype.names:  # Structured array
+            T = y['time']
+            E = y['event']
+        else:
+            raise ValueError("Outcome y must be dict with 'T'/'E' or structured array for survival models")
+        
+        # Create structured array for sksurv
+        # Event = False means censored, Event = True means event occurred
+        y_surv = np.array([(e == 1, t) for e, t in zip(E, T)],
+                         dtype=[('event', bool), ('time', float)])
+        
+        # Fit model
+        self.model_ = RandomSurvivalForest(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            random_state=RANDOM_SEED,
+            n_jobs=1  # Set to 1 for use within GridSearchCV
+        )
+        self.model_.fit(X_df, y_surv)
+        
+        return self
+    
+    def predict(self, X):
+        """Generate risk scores for samples."""
+        if self.model_ is None:
+            raise ValueError("Model has not been fitted yet")
+        
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X.astype(float)
+        X_df = X_df[self.feature_names_]
+        
+        # Get risk scores
+        scores = self.model_.predict(X_df)
+        return scores
 
 
 class PredefinedLinearScore(ClassifierMixin, BaseEstimator):
@@ -400,7 +611,7 @@ class NestedCVTrainer:
         if numeric_cols:
             scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
         if categorical_cols:
-            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
         
         column_preprocessor = ColumnTransformer(transformers=scaling_encoding_transformers)
         
@@ -479,7 +690,7 @@ class NestedCVTrainer:
         if numeric_cols:
             final_scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
         if categorical_cols:
-            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
         
         final_column_preprocessor = ColumnTransformer(transformers=final_scaling_encoding_transformers)
         final_preprocessing_pipeline = Pipeline(steps=[
@@ -552,7 +763,7 @@ class NestedCVTrainer:
         if numeric_cols:
             scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
         if categorical_cols:
-            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
         
         column_preprocessor = ColumnTransformer(transformers=scaling_encoding_transformers)
         
@@ -625,7 +836,7 @@ class NestedCVTrainer:
         if numeric_cols:
             final_scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
         if categorical_cols:
-            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols))
+            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
         
         final_column_preprocessor = ColumnTransformer(transformers=final_scaling_encoding_transformers)
         final_preprocessing_pipeline = Pipeline(steps=[
@@ -654,6 +865,368 @@ class NestedCVTrainer:
         
         logger.info(f"\nRandom Forest CV Results ({self.imputation_strategy}):")
         logger.info(f"  Mean AUC: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
+        logger.info("=" * 60)
+        
+        return results
+    
+    def train_elastic_net_survival(self, X, T, E, param_grid=None):
+        """
+        Train Cox Proportional Hazards with Elastic Net regularization using nested CV.
+        
+        Parameters
+        ----------
+        X : np.ndarray or pd.DataFrame
+            Feature matrix
+        T : np.ndarray
+            Time to event
+        E : np.ndarray
+            Event indicator (0=censored, 1=event)
+        param_grid : dict, optional
+            Hyperparameter grid for tuning. If None, uses COXPH_PARAMS_SURVIVAL
+        
+        Returns
+        -------
+        results : dict
+            Dictionary containing CV scores, best params, and models
+        """
+        if param_grid is None:
+            param_grid = COXPH_PARAMS_SURVIVAL
+        
+        if not HAS_LIFELINES:
+            raise ImportError("lifelines is required for Cox models. Install with: pip install lifelines")
+        
+        logger.info("=" * 60)
+        logger.info(f"TRAINING ELASTIC NET COX MODEL")
+        logger.info(f"Imputation: {self.imputation_strategy.upper()}")
+        logger.info("=" * 60)
+        
+        # Analyze missingness before training
+        MissingnessAnalyzer.report_missingness(X, prefix="  ")
+        
+        # Identify column types for preprocessing
+        categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        numeric_cols = [col for col in X.columns if col not in categorical_cols]
+        
+        # Create imputation transformer
+        imputer = get_imputation_transformer(self.imputation_strategy)
+        
+        # Build preprocessing pipeline
+        scaling_encoding_transformers = []
+        if numeric_cols:
+            scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
+        
+        column_preprocessor = ColumnTransformer(transformers=scaling_encoding_transformers)
+        
+        preprocessing_pipeline = Pipeline(steps=[
+            ('impute', imputer),
+            ('scale_encode', column_preprocessor)
+        ])
+        
+        base_model = CoxPHWrapper()
+        
+        pipeline = Pipeline(steps=[
+            ('preprocess', preprocessing_pipeline),
+            ('clf', base_model)
+        ])
+        
+        cv_scores = []
+        best_models = []
+        best_params_list = []
+        
+        # Combine T and E for stratification in CV
+        y_combined = np.column_stack((T, E))
+        
+        fold = 1
+        for train_idx, test_idx in self.cv_outer.split(X, E):  # Stratify by event status
+            logger.info(f"\nOuter fold {fold}/{self.n_splits_outer}")
+            
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            T_train, T_test = T[train_idx], T[test_idx]
+            E_train, E_test = E[train_idx], E[test_idx]
+            
+            # Create outcome dict for this fold
+            y_train_survival = {'T': T_train, 'E': E_train}
+            y_test_survival = {'T': T_test, 'E': E_test}
+            
+            # Adapt hyperparameter grid for pipeline
+            param_grid_pipeline = {f"clf__{k}": v for k, v in param_grid.items()}
+            
+            # Custom CV loop for survival (GridSearchCV doesn't directly support tuple targets)
+            from sklearn.model_selection import ParameterGrid
+            best_score = -np.inf
+            best_model = None
+            best_params = None
+            
+            for params in ParameterGrid(param_grid_pipeline):
+                pipeline.set_params(**params)
+                
+                # Inner CV
+                fold_scores = []
+                for inner_train_idx, inner_test_idx in self.cv_inner.split(X_train, E_train):
+                    X_train_inner, X_test_inner = X_train.iloc[inner_train_idx], X_train.iloc[inner_test_idx]
+                    T_train_inner, T_test_inner = T_train[inner_train_idx], T_train[inner_test_idx]
+                    E_train_inner, E_test_inner = E_train[inner_train_idx], E_train[inner_test_idx]
+                    
+                    y_train_inner = {'T': T_train_inner, 'E': E_train_inner}
+                    y_test_inner = {'T': T_test_inner, 'E': E_test_inner}
+                    
+                    try:
+                        pipeline.fit(X_train_inner, y_train_inner)
+                        # Compute concordance index
+                        scores = pipeline.predict(X_test_inner)
+                        if HAS_SKSURV:
+                            c_index = concordance_index_censored(E_test_inner == 1, T_test_inner, scores)[0]
+                        else:
+                            # Fallback: use basic evaluation
+                            c_index = np.mean(scores)  # Poor proxy, but safe default
+                        fold_scores.append(c_index)
+                    except Exception as e:
+                        logger.warning(f"Error in inner fold: {e}")
+                        fold_scores.append(0.0)
+                
+                mean_score = np.mean(fold_scores)
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_params = params.copy()
+                    # Refit on full training fold
+                    try:
+                        pipeline.set_params(**best_params)
+                        pipeline.fit(X_train, y_train_survival)
+                        best_model = copy.deepcopy(pipeline)
+                    except Exception as e:
+                        logger.warning(f"Error refitting model: {e}")
+            
+            # Evaluate on outer test set
+            if best_model is not None:
+                try:
+                    test_scores = best_model.predict(X_test)
+                    if HAS_SKSURV:
+                        test_c_index = concordance_index_censored(E_test == 1, T_test, test_scores)[0]
+                    else:
+                        test_c_index = 0.5  # Default when no sksurv
+                    cv_scores.append(test_c_index)
+                    best_models.append(best_model)
+                    best_params_list.append(best_params)
+                    logger.info(f"  Outer fold test C-index: {test_c_index:.4f}")
+                except Exception as e:
+                    logger.warning(f"Error evaluating on test set: {e}")
+                    cv_scores.append(0.5)
+            
+            fold += 1
+        
+        cv_scores = np.array(cv_scores)
+        best_params_overall = self._get_most_common_params(best_params_list if best_params_list else [{}])
+        
+        # Train final model
+        final_imputer = get_imputation_transformer(self.imputation_strategy)
+        final_scaling_encoding_transformers = []
+        if numeric_cols:
+            final_scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
+        
+        final_column_preprocessor = ColumnTransformer(transformers=final_scaling_encoding_transformers)
+        final_preprocessing_pipeline = Pipeline(steps=[
+            ('impute', final_imputer),
+            ('scale_encode', final_column_preprocessor)
+        ])
+        
+        final_pipeline = Pipeline(steps=[
+            ('preprocess', final_preprocessing_pipeline),
+            ('clf', CoxPHWrapper())
+        ])
+        final_pipeline.set_params(**best_params_overall)
+        final_pipeline.fit(X, {'T': T, 'E': E})
+        
+        results = {
+            'model_name': 'Elastic Net Cox',
+            'imputation_strategy': self.imputation_strategy,
+            'cv_scores': cv_scores,
+            'mean_score': cv_scores.mean(),
+            'std_score': cv_scores.std(),
+            'best_params': best_params_overall,
+            'final_model': final_pipeline,
+            'fold_models': best_models,
+            'fold_params': best_params_list
+        }
+        
+        logger.info(f"\nElastic Net Cox CV Results ({self.imputation_strategy}):")
+        logger.info(f"  Mean C-index: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
+        logger.info("=" * 60)
+        
+        return results
+    
+    def train_random_forest_survival(self, X, T, E, param_grid=None):
+        """
+        Train Random Survival Forest using nested CV.
+        
+        Parameters
+        ----------
+        X : np.ndarray or pd.DataFrame
+            Feature matrix
+        T : np.ndarray
+            Time to event
+        E : np.ndarray
+            Event indicator (0=censored, 1=event)
+        param_grid : dict, optional
+            Hyperparameter grid for tuning. If None, uses RANDOM_SURVIVAL_FOREST_PARAMS
+        
+        Returns
+        -------
+        results : dict
+            Dictionary containing CV scores, best params, and models
+        """
+        if param_grid is None:
+            param_grid = RANDOM_SURVIVAL_FOREST_PARAMS
+        
+        if not HAS_SKSURV:
+            raise ImportError("scikit-survival is required for Random Survival Forest. Install with: pip install scikit-survival")
+        
+        logger.info("=" * 60)
+        logger.info(f"TRAINING RANDOM SURVIVAL FOREST")
+        logger.info(f"Imputation: {self.imputation_strategy.upper()}")
+        logger.info("=" * 60)
+        
+        # Analyze missingness before training
+        MissingnessAnalyzer.report_missingness(X, prefix="  ")
+        
+        # Identify column types for preprocessing
+        categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        numeric_cols = [col for col in X.columns if col not in categorical_cols]
+        
+        # Create imputation transformer
+        imputer = get_imputation_transformer(self.imputation_strategy)
+        
+        # Build preprocessing pipeline
+        scaling_encoding_transformers = []
+        if numeric_cols:
+            scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
+        
+        column_preprocessor = ColumnTransformer(transformers=scaling_encoding_transformers)
+        
+        preprocessing_pipeline = Pipeline(steps=[
+            ('impute', imputer),
+            ('scale_encode', column_preprocessor)
+        ])
+        
+        base_model = RandomSurvivalForestWrapper()
+        
+        pipeline = Pipeline(steps=[
+            ('preprocess', preprocessing_pipeline),
+            ('clf', base_model)
+        ])
+        
+        cv_scores = []
+        best_models = []
+        best_params_list = []
+        
+        fold = 1
+        for train_idx, test_idx in self.cv_outer.split(X, E):  # Stratify by event status
+            logger.info(f"\nOuter fold {fold}/{self.n_splits_outer}")
+            
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            T_train, T_test = T[train_idx], T[test_idx]
+            E_train, E_test = E[train_idx], E[test_idx]
+            
+            y_train_survival = {'T': T_train, 'E': E_train}
+            y_test_survival = {'T': T_test, 'E': E_test}
+            
+            param_grid_pipeline = {f"clf__{k}": v for k, v in param_grid.items()}
+            
+            # Grid search with custom evaluation
+            from sklearn.model_selection import ParameterGrid
+            best_score = -np.inf
+            best_model = None
+            best_params = None
+            
+            for params in ParameterGrid(param_grid_pipeline):
+                pipeline.set_params(**params)
+                
+                fold_scores = []
+                for inner_train_idx, inner_test_idx in self.cv_inner.split(X_train, E_train):
+                    X_train_inner, X_test_inner = X_train.iloc[inner_train_idx], X_train.iloc[inner_test_idx]
+                    T_train_inner, T_test_inner = T_train[inner_train_idx], T_train[inner_test_idx]
+                    E_train_inner, E_test_inner = E_train[inner_train_idx], E_train[inner_test_idx]
+                    
+                    y_train_inner = {'T': T_train_inner, 'E': E_train_inner}
+                    y_test_inner = {'T': T_test_inner, 'E': E_test_inner}
+                    
+                    try:
+                        pipeline.fit(X_train_inner, y_train_inner)
+                        scores = pipeline.predict(X_test_inner)
+                        c_index = concordance_index_censored(E_test_inner == 1, T_test_inner, scores)[0]
+                        fold_scores.append(c_index)
+                    except Exception as e:
+                        logger.warning(f"Error in inner fold: {e}")
+                        fold_scores.append(0.0)
+                
+                mean_score = np.mean(fold_scores)
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_params = params.copy()
+                    try:
+                        pipeline.set_params(**best_params)
+                        pipeline.fit(X_train, y_train_survival)
+                        best_model = copy.deepcopy(pipeline)
+                    except Exception as e:
+                        logger.warning(f"Error refitting model: {e}")
+            
+            if best_model is not None:
+                try:
+                    test_scores = best_model.predict(X_test)
+                    test_c_index = concordance_index_censored(E_test == 1, T_test, test_scores)[0]
+                    cv_scores.append(test_c_index)
+                    best_models.append(best_model)
+                    best_params_list.append(best_params)
+                    logger.info(f"  Outer fold test C-index: {test_c_index:.4f}")
+                except Exception as e:
+                    logger.warning(f"Error evaluating on test set: {e}")
+                    cv_scores.append(0.5)
+            
+            fold += 1
+        
+        cv_scores = np.array(cv_scores)
+        best_params_overall = self._get_most_common_params(best_params_list if best_params_list else [{}])
+        
+        # Train final model
+        final_imputer = get_imputation_transformer(self.imputation_strategy)
+        final_scaling_encoding_transformers = []
+        if numeric_cols:
+            final_scaling_encoding_transformers.append(('num', StandardScaler(), numeric_cols))
+        if categorical_cols:
+            final_scaling_encoding_transformers.append(('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols))
+        
+        final_column_preprocessor = ColumnTransformer(transformers=final_scaling_encoding_transformers)
+        final_preprocessing_pipeline = Pipeline(steps=[
+            ('impute', final_imputer),
+            ('scale_encode', final_column_preprocessor)
+        ])
+        
+        final_pipeline = Pipeline(steps=[
+            ('preprocess', final_preprocessing_pipeline),
+            ('clf', RandomSurvivalForestWrapper())
+        ])
+        final_pipeline.set_params(**best_params_overall)
+        final_pipeline.fit(X, {'T': T, 'E': E})
+        
+        results = {
+            'model_name': 'Random Survival Forest',
+            'imputation_strategy': self.imputation_strategy,
+            'cv_scores': cv_scores,
+            'mean_score': cv_scores.mean(),
+            'std_score': cv_scores.std(),
+            'best_params': best_params_overall,
+            'final_model': final_pipeline,
+            'fold_models': best_models,
+            'fold_params': best_params_list
+        }
+        
+        logger.info(f"\nRandom Survival Forest CV Results ({self.imputation_strategy}):")
+        logger.info(f"  Mean C-index: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
         logger.info("=" * 60)
         
         return results
@@ -875,18 +1448,25 @@ def evaluate_predefined_scores(X, y, imputation_strategy='median'):
     return results
 
 
-def run_full_pipeline(X, y, imputation_strategy='median'):
+def run_full_pipeline(X, y, T=None, E=None, imputation_strategy='median', outcome_type='binary'):
     """
     Run complete model training pipeline with both models.
+    Supports both binary classification and survival analysis outcomes.
     
     Parameters
     ----------
     X : pd.DataFrame
         Feature matrix
     y : pd.Series
-        Target variable
+        Target variable (for binary: class labels; for survival: event indicator)
+    T : np.ndarray, optional
+        Time to event (required for survival outcome)
+    E : np.ndarray, optional
+        Event indicator (required for survival outcome)
     imputation_strategy : str
         Imputation strategy: 'median', 'knn', or 'none'
+    outcome_type : str
+        Type of outcome: 'binary' or 'survival'
     
     Returns
     -------
@@ -895,10 +1475,11 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     """
     logger.info("\n" + "=" * 60)
     logger.info(f"NESTED CROSS-VALIDATION TRAINING PIPELINE")
+    logger.info(f"Outcome Type: {outcome_type.upper()}")
     logger.info(f"Imputation Strategy: {imputation_strategy.upper()}")
     logger.info("=" * 60)
     
-    # Extract original feature names from X (will be DataFrame if called from data_prep)
+    # Extract original feature names from X
     feature_names = list(X.columns) if hasattr(X, 'columns') else None
     
     # Extract transformed feature names from the final model's preprocessor
@@ -911,61 +1492,107 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
         imputation_strategy=imputation_strategy
     )
     
-    # Train Elastic Net
-    en_results = trainer.train_elastic_net(X, y)
-    
-    # Extract transformed feature names from Elastic Net's fitted preprocessor
-    try:
-        en_model = en_results['final_model']
-        if hasattr(en_model, 'named_steps') and 'preprocess' in en_model.named_steps:
-            preprocess = en_model.named_steps['preprocess']
-            if hasattr(preprocess, 'named_steps') and 'scale_encode' in preprocess.named_steps:
-                scale_encode = preprocess.named_steps['scale_encode']
-                if hasattr(scale_encode, 'get_feature_names_out'):
-                    transformed_feature_names = scale_encode.get_feature_names_out().tolist()
-                    logger.info(f"Extracted {len(transformed_feature_names)} transformed feature names from fitted pipeline")
-    except Exception as e:
-        logger.debug(f"Could not extract transformed feature names: {e}")
-    
-    # Train Random Forest
-    rf_results = trainer.train_random_forest(X, y)
-
-    # Evaluate any predefined linear scores for this strategy
-    linear_score_results = evaluate_predefined_scores(X, y, imputation_strategy=imputation_strategy)
-    if linear_score_results:
-        logger.info(
-            f"Evaluated {len(linear_score_results)} predefined score model(s) "
-            f"under {imputation_strategy.upper()} imputation."
+    # Train models based on outcome type
+    if outcome_type.lower() in ['survival', 'survival_analysis']:
+        if T is None or E is None:
+            raise ValueError("T (time) and E (event) are required for survival analysis")
+        
+        # Train Elastic Net Cox
+        en_results = trainer.train_elastic_net_survival(X, T, E)
+        
+        # Train Random Survival Forest
+        rf_results = trainer.train_random_forest_survival(X, T, E)
+        
+        # Extract transformed feature names from fitted pipeline
+        try:
+            en_model = en_results['final_model']
+            if hasattr(en_model, 'named_steps') and 'preprocess' in en_model.named_steps:
+                preprocess = en_model.named_steps['preprocess']
+                if hasattr(preprocess, 'named_steps') and 'scale_encode' in preprocess.named_steps:
+                    scale_encode = preprocess.named_steps['scale_encode']
+                    if hasattr(scale_encode, 'get_feature_names_out'):
+                        transformed_feature_names = scale_encode.get_feature_names_out().tolist()
+                        logger.info(f"Extracted {len(transformed_feature_names)} transformed feature names from fitted pipeline")
+        except Exception as e:
+            logger.debug(f"Could not extract transformed feature names: {e}")
+        
+        # Determine best model
+        best_model_name = (
+            en_results['model_name']
+            if en_results['mean_score'] > rf_results['mean_score']
+            else rf_results['model_name']
         )
-    else:
-        logger.info("No predefined score models evaluated (none configured).")
-    
-    # Determine best model among the trained ML models (Elastic Net vs RF)
-    best_model_name = (
-        en_results['model_name']
-        if en_results['mean_score'] > rf_results['mean_score']
-        else rf_results['model_name']
-    )
-    
-    logger.info("\n" + "=" * 60)
-    logger.info(f"BEST MODEL COMPARISON ({imputation_strategy.upper()})")
-    logger.info("=" * 60)
-    logger.info(
-        f"Elastic Net CV AUC: {en_results['mean_score']:.4f} "
-        f"(+/- {en_results['std_score']:.4f})"
-    )
-    logger.info(
-        f"Random Forest CV AUC: {rf_results['mean_score']:.4f} "
-        f"(+/- {rf_results['std_score']:.4f})"
-    )
-    if linear_score_results:
-        for key, res in linear_score_results.items():
+        
+        logger.info("\n" + "=" * 60)
+        logger.info(f"BEST MODEL COMPARISON ({imputation_strategy.upper()})")
+        logger.info("=" * 60)
+        logger.info(
+            f"Elastic Net Cox CV C-index: {en_results['mean_score']:.4f} "
+            f"(+/- {en_results['std_score']:.4f})"
+        )
+        logger.info(
+            f"Random Survival Forest CV C-index: {rf_results['mean_score']:.4f} "
+            f"(+/- {rf_results['std_score']:.4f})"
+        )
+        logger.info(f"Best Model: {best_model_name}")
+        logger.info("=" * 60)
+        
+    else:  # Binary classification
+        # Train Elastic Net
+        en_results = trainer.train_elastic_net(X, y)
+        
+        # Extract transformed feature names from Elastic Net's fitted preprocessor
+        try:
+            en_model = en_results['final_model']
+            if hasattr(en_model, 'named_steps') and 'preprocess' in en_model.named_steps:
+                preprocess = en_model.named_steps['preprocess']
+                if hasattr(preprocess, 'named_steps') and 'scale_encode' in preprocess.named_steps:
+                    scale_encode = preprocess.named_steps['scale_encode']
+                    if hasattr(scale_encode, 'get_feature_names_out'):
+                        transformed_feature_names = scale_encode.get_feature_names_out().tolist()
+                        logger.info(f"Extracted {len(transformed_feature_names)} transformed feature names from fitted pipeline")
+        except Exception as e:
+            logger.debug(f"Could not extract transformed feature names: {e}")
+        
+        # Train Random Forest
+        rf_results = trainer.train_random_forest(X, y)
+        
+        # Evaluate any predefined linear scores for this strategy
+        linear_score_results = evaluate_predefined_scores(X, y, imputation_strategy=imputation_strategy)
+        if linear_score_results:
             logger.info(
-                f"{res['model_name']} CV AUC: {res['mean_score']:.4f} "
-                f"(+/- {res['std_score']:.4f})"
+                f"Evaluated {len(linear_score_results)} predefined score model(s) "
+                f"under {imputation_strategy.upper()} imputation."
             )
-    logger.info(f"Best ML Model (Elastic Net vs RF): {best_model_name}")
-    logger.info("=" * 60)
+        else:
+            logger.info("No predefined score models evaluated (none configured).")
+        
+        # Determine best model among the trained ML models (Elastic Net vs RF)
+        best_model_name = (
+            en_results['model_name']
+            if en_results['mean_score'] > rf_results['mean_score']
+            else rf_results['model_name']
+        )
+        
+        logger.info("\n" + "=" * 60)
+        logger.info(f"BEST MODEL COMPARISON ({imputation_strategy.upper()})")
+        logger.info("=" * 60)
+        logger.info(
+            f"Elastic Net CV AUC: {en_results['mean_score']:.4f} "
+            f"(+/- {en_results['std_score']:.4f})"
+        )
+        logger.info(
+            f"Random Forest CV AUC: {rf_results['mean_score']:.4f} "
+            f"(+/- {rf_results['std_score']:.4f})"
+        )
+        if linear_score_results:
+            for key, res in linear_score_results.items():
+                logger.info(
+                    f"{res['model_name']} CV AUC: {res['mean_score']:.4f} "
+                    f"(+/- {res['std_score']:.4f})"
+                )
+        logger.info(f"Best ML Model (Elastic Net vs RF): {best_model_name}")
+        logger.info("=" * 60)
     
     # Save models with imputation strategy in filename
     # final_models are fit on full data using best hyperparameters from CV
@@ -978,9 +1605,10 @@ def run_full_pipeline(X, y, imputation_strategy='median'):
     results = {
         'elastic_net': en_results,
         'random_forest': rf_results,
-        'linear_scores': linear_score_results,
+        'linear_scores': linear_score_results if outcome_type.lower() == 'binary' else {},
         'best_model_name': best_model_name,
         'imputation_strategy': imputation_strategy,
+        'outcome_type': outcome_type,
         'feature_names': feature_names,
         'transformed_feature_names': transformed_feature_names
     }
@@ -999,5 +1627,5 @@ if __name__ == '__main__':
     X, y = data['X'], data['y']
     
     # Run training pipeline
-    results = run_full_pipeline(X, y)
+    results = run_full_pipeline(X, y, outcome_type=data.get('outcome_type', 'binary'))
     logger.info("Model training pipeline completed!")

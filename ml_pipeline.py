@@ -82,6 +82,14 @@ CACHING BEHAVIOR:
         help='Name of the time column in the dataset. If not provided, uses default from config.'
     )
     parser.add_argument(
+        '--outcome-type',
+        type=str,
+        default=None,
+        choices=['binary', 'survival'],
+        help='Type of outcome: binary (classification) or survival (time-to-event). '
+             'If not provided, uses default from config. (default: binary)'
+    )
+    parser.add_argument(
         '--retrain',
         action='store_true',
         default=False,
@@ -92,6 +100,10 @@ CACHING BEHAVIOR:
     args = parser.parse_args()
     
     # Update config with command line arguments if provided
+    if args.outcome_type:
+        config.OUTCOME_TYPE = args.outcome_type
+        logger.info(f"Using outcome type from command line: {args.outcome_type}")
+    
     if args.target_column:
         config.TARGET_COLUMN = args.target_column
         logger.info(f"Using target column from command line: {args.target_column}")
@@ -123,6 +135,7 @@ CACHING BEHAVIOR:
     logger.info(f"Pipeline started at {datetime.now().isoformat()}")
     logger.info(f"Project path: {PROJECT_PATH}")
     logger.info(f"Data file: {dataset_path}")
+    logger.info(f"Outcome type: {config.OUTCOME_TYPE.upper()}")
     logger.info(f"Target column: {config.TARGET_COLUMN}")
     logger.info(f"Time column: {config.TIME_COLUMN}")
     
@@ -130,19 +143,29 @@ CACHING BEHAVIOR:
         # ====== STEP 1: DATA PREPARATION ======
         print_header("Step 1: Data Loading and Preparation")
         logger.info("Initiating data preparation...")
+        logger.info(f"  - Outcome type: {config.OUTCOME_TYPE.upper()}")
         
         data = prepare_pipeline_data(
             dataset_path,
             target_column=config.TARGET_COLUMN,
-            time_column=config.TIME_COLUMN
+            time_column=config.TIME_COLUMN,
+            outcome_type=config.OUTCOME_TYPE
         )
         X = data['X']
         y = data['y']
+        outcome_type = data['outcome_type']
+        
+        # Extract survival data if available
+        T = data.get('T', None)
+        E = data.get('E', None)
         
         logger.info(f"✓ Data preparation completed")
         logger.info(f"  - Samples: {X.shape[0]}")
         logger.info(f"  - Features: {X.shape[1]}")
-        logger.info(f"  - Target classes: {y.nunique()}")
+        if outcome_type.lower() in ['survival', 'survival_analysis']:
+            logger.info(f"  - Events: {E.sum()}, Censored: {(1-E).sum()}")
+        else:
+            logger.info(f"  - Target classes: {y.nunique()}")
         
         # ====== STEP 1.5: ASSESS MISSINGNESS ======
         print_header("Step 1.5: Missingness Assessment")
@@ -191,30 +214,41 @@ CACHING BEHAVIOR:
                 if results is None:
                     logger.warning(f"Failed to load cache for {strategy}. Training from scratch...")
                     logger.info(f"Training pipeline with {strategy.upper()} imputation")
-                    results = run_full_pipeline(X, y, imputation_strategy=strategy)
+                    results = run_full_pipeline(
+                        X, y, T=T, E=E, 
+                        imputation_strategy=strategy, 
+                        outcome_type=outcome_type
+                    )
             else:
                 if args.retrain:
                     logger.info(f"Training pipeline with {strategy.upper()} imputation (re-train forced)")
                 else:
                     logger.info(f"Training pipeline with {strategy.upper()} imputation (no cache available)")
-                results = run_full_pipeline(X, y, imputation_strategy=strategy)
+                results = run_full_pipeline(
+                    X, y, T=T, E=E,
+                    imputation_strategy=strategy, 
+                    outcome_type=outcome_type
+                )
             
             all_results[strategy] = results
+            
+            # Determine metric name based on outcome type
+            metric_name = "C-index" if outcome_type.lower() in ['survival', 'survival_analysis'] else "AUC"
             
             # Store summary for later comparison
             strategy_summary.append({
                 'Imputation Strategy': strategy.upper(),
-                'Elastic Net Mean AUC': results['elastic_net']['mean_score'],
-                'Elastic Net Std AUC': results['elastic_net']['std_score'],
-                'Random Forest Mean AUC': results['random_forest']['mean_score'],
-                'Random Forest Std AUC': results['random_forest']['std_score'],
+                f'Elastic Net Mean {metric_name}': results['elastic_net']['mean_score'],
+                f'Elastic Net Std {metric_name}': results['elastic_net']['std_score'],
+                f'Random Forest Mean {metric_name}': results['random_forest']['mean_score'],
+                f'Random Forest Std {metric_name}': results['random_forest']['std_score'],
                 'Best Model': results['best_model_name']
             })
             
             logger.info(f"✓ {strategy.upper()} imputation completed")
             logger.info(f"  - Best model: {results['best_model_name']}")
-            logger.info(f"  - Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
-            logger.info(f"  - Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
+            logger.info(f"  - Elastic Net CV {metric_name}: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
+            logger.info(f"  - Random Forest CV {metric_name}: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
         
         # ====== STEP 3: EVALUATION AND CONSOLIDATED REPORTING ======
         print_header("Step 3: Evaluation and Consolidated Reporting")
@@ -330,10 +364,13 @@ def format_strategy_results(all_results):
     """Format strategy results for display."""
     lines = []
     for strategy, results in all_results.items():
+        outcome_type = results.get('outcome_type', 'binary')
+        metric_name = "C-index" if outcome_type.lower() in ['survival', 'survival_analysis'] else "AUC"
+        
         lines.append(f"\n        {strategy.upper()} IMPUTATION")
-        lines.append(f"          • Elastic Net CV AUC: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
-        lines.append(f"          • Random Forest CV AUC: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
-        # Any predefined linear scores evaluated under this strategy
+        lines.append(f"          • Elastic Net CV {metric_name}: {results['elastic_net']['mean_score']:.4f} (+/- {results['elastic_net']['std_score']:.4f})")
+        lines.append(f"          • Random Forest CV {metric_name}: {results['random_forest']['mean_score']:.4f} (+/- {results['random_forest']['std_score']:.4f})")
+        # Any predefined linear scores evaluated under this strategy (binary classification only)
         linear_scores = results.get('linear_scores', {}) or {}
         if linear_scores:
             lines.append("          • Predefined Linear Scores:")
@@ -346,7 +383,7 @@ def format_strategy_results(all_results):
     return "\n".join(lines)
 
 
-def main_single_strategy(imputation_strategy='median'):
+def main_single_strategy(imputation_strategy='median', outcome_type='binary'):
     """
     Execute the ML pipeline with a single imputation strategy.
     Useful for focused analysis on one approach.
@@ -355,18 +392,23 @@ def main_single_strategy(imputation_strategy='median'):
     ----------
     imputation_strategy : str
         Imputation strategy: 'median' or 'knn'
+    outcome_type : str
+        Type of outcome: 'binary' or 'survival'
     """
     
     print_header(f"ML Pipeline - Single Strategy ({imputation_strategy.upper()})")
     logger.info(f"Pipeline started at {datetime.now().isoformat()}")
+    logger.info(f"Outcome type: {outcome_type.upper()}")
     logger.info(f"Imputation strategy: {imputation_strategy.upper()}")
     
     try:
         # Data preparation
         print_header("Step 1: Data Loading and Preparation")
-        data = prepare_pipeline_data()
+        data = prepare_pipeline_data(outcome_type=outcome_type)
         X = data['X']
         y = data['y']
+        T = data.get('T', None)
+        E = data.get('E', None)
         
         logger.info(f"✓ Data preparation completed")
         logger.info(f"  - Samples: {X.shape[0]}")
@@ -374,7 +416,7 @@ def main_single_strategy(imputation_strategy='median'):
         
         # Model training
         print_header(f"Step 2: Model Training ({imputation_strategy.upper()} Imputation)")
-        results = run_full_pipeline(X, y, imputation_strategy=imputation_strategy)
+        results = run_full_pipeline(X, y, T=T, E=E, imputation_strategy=imputation_strategy, outcome_type=outcome_type)
         
         # Evaluation and reporting
         print_header("Step 3: Evaluation and Reporting")

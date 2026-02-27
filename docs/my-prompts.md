@@ -95,3 +95,15 @@ Specifically, I would you consider these 'docs/' and (more importantly) the curr
 1) a SETUP.md file which describes how a new user would setup their compute environment to be able to run the environment (assuming that all software management will be performed by creation of a  mamba enviroment)
 2) a short QUICK_GUIDE.md with a brief introduction to the pipelines basic functions
 2) a more verbose IMPLEMENTATION_GUIDE.md with the more complete documenation of the relevant pipeline functions. 
+
+## 
+
+Goal: I eventually want to extend my ML pipeline to be able to accommodate time-to-event survival outcomes, moving from tuning/training elastic net to a penalized cox elastic net and from random forests to random survival forest.
+
+Key decision to be made before pursuing goal: for this big adjustment to my pipeline, should I integrate the survival into the existing pipeline or should I fork this repo and make a seperate, surivival-focused pipeline?
+
+Decision criteria:
+* how much code would be shared across these two opperation (binary vs. survival outcomes). If a lot shared, this would suggest it should stay as one repo.
+* how much more complex will my codebase become if I integrate the survival analysis into the existing pipeline. If a lot more complex, this would suggest it should become two specialized repos.
+
+Are there other decision criteria I should be considering? Can you present those and assess how the required updates to my codebase under both of these scenarios measure up against all decision criteria?

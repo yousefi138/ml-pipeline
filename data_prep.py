@@ -9,8 +9,9 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 import warnings
 
 from config import (
-    DATA_FILE, TARGET_COLUMN, TIME_COLUMN, RANDOM_SEED
+    DATA_FILE, TARGET_COLUMN, TIME_COLUMN, RANDOM_SEED, OUTCOME_TYPE
 )
+from outcome import get_outcome_handler
 from utils import (
     setup_logging, validate_target_variable, check_feature_coverage,
     assess_class_imbalance, get_feature_groups
@@ -74,9 +75,9 @@ def explore_data(df):
     return exploration
 
 
-def validate_data(df, target_column=TARGET_COLUMN):
+def validate_data(df, target_column=TARGET_COLUMN, time_column=TIME_COLUMN, outcome_type=OUTCOME_TYPE):
     """
-    Perform comprehensive data validation.
+    Perform comprehensive data validation using outcome-specific handlers.
     
     Parameters
     ----------
@@ -84,6 +85,10 @@ def validate_data(df, target_column=TARGET_COLUMN):
         Input dataframe
     target_column : str
         Name of the target column
+    time_column : str
+        Name of the time column (used for survival analysis)
+    outcome_type : str
+        Type of outcome: 'binary' or 'survival'
     
     Returns
     -------
@@ -92,14 +97,21 @@ def validate_data(df, target_column=TARGET_COLUMN):
     """
     logger.info("=" * 60)
     logger.info("DATA VALIDATION")
+    logger.info(f"Outcome type: {outcome_type.upper()}")
     logger.info("=" * 60)
     
     validation_report = {}
     
-    # Validate target variable
-    is_valid_target, target_report = validate_target_variable(df, target_column)
-    validation_report['target_variable'] = target_report
-    logger.info(f"\nTarget variable validation: {target_report}")
+    # Get outcome handler and validate outcome
+    outcome_handler = get_outcome_handler(outcome_type)
+    is_valid_outcome, outcome_report = outcome_handler.validate_outcome(
+        df, target_column, time_column
+    )
+    validation_report['outcome_variable'] = outcome_report
+    logger.info(f"\nOutcome variable validation: {outcome_report}")
+    
+    if not is_valid_outcome:
+        raise ValueError(f"Invalid outcome data: {outcome_report}")
     
     # Check feature coverage
     feature_groups = get_feature_groups(df)
@@ -109,11 +121,12 @@ def validate_data(df, target_column=TARGET_COLUMN):
     validation_report['feature_coverage'] = feature_report
     logger.info(f"\nFeature coverage: {feature_report}")
     
-    # Assess class imbalance
-    y = df[target_column]
-    imbalance_report = assess_class_imbalance(y)
-    validation_report['class_imbalance'] = imbalance_report
-    logger.info(f"\nClass imbalance assessment:\n{imbalance_report}")
+    # Assess class imbalance (binary classification only)
+    if outcome_type.lower() not in ['survival', 'survival_analysis']:
+        y = df[target_column]
+        imbalance_report = assess_class_imbalance(y)
+        validation_report['class_imbalance'] = imbalance_report
+        logger.info(f"\nClass imbalance assessment:\n{imbalance_report}")
     
     # Check for missing values in features
     feature_cols = feature_groups['all_features']
@@ -205,9 +218,10 @@ def preprocess_features(df, target_column=TARGET_COLUMN, time_column=TIME_COLUMN
     return X, y, feature_groups, encoders, scaler
 
 
-def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=None):
+def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=None, outcome_type=None):
     """
     Complete data preparation pipeline: load, validate, and preprocess.
+    Supports both binary classification and survival analysis outcomes.
     
     Parameters
     ----------
@@ -217,19 +231,24 @@ def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=No
         Name of the target column. If None, uses config.TARGET_COLUMN
     time_column : str, optional
         Name of the time column. If None, uses config.TIME_COLUMN
+    outcome_type : str, optional
+        Type of outcome: 'binary' or 'survival'. If None, uses config.OUTCOME_TYPE
     
     Returns
     -------
     results : dict
-        Dictionary containing X, y, metadata, and preprocessing objects
+        Dictionary containing X, y (and T, E for survival), metadata, and preprocessing objects
     """
     # Use config values if not provided
     if target_column is None:
         target_column = TARGET_COLUMN
     if time_column is None:
         time_column = TIME_COLUMN
+    if outcome_type is None:
+        outcome_type = OUTCOME_TYPE
     
     logger.info("Starting data preparation pipeline...")
+    logger.info(f"Outcome type: {outcome_type.upper()}")
     
     # Load data
     df = load_data(filepath)
@@ -238,7 +257,8 @@ def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=No
     exploration = explore_data(df)
     
     # Validate data
-    validation_report = validate_data(df, target_column=target_column)
+    validation_report = validate_data(df, target_column=target_column, 
+                                      time_column=time_column, outcome_type=outcome_type)
     
     # Preprocess features
     # NOTE: For the main training pipeline, we disable encoding and scaling
@@ -253,9 +273,14 @@ def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=No
         encode_categorical=False
     )
     
+    # Extract outcome based on type
+    outcome_handler = get_outcome_handler(outcome_type)
+    outcome_data = outcome_handler.extract_outcome(df, target_column, time_column)
+    
     results = {
         'X': X,
         'y': y,
+        'outcome_type': outcome_type,
         'df_raw': df,
         'exploration': exploration,
         'validation_report': validation_report,
@@ -266,6 +291,11 @@ def prepare_pipeline_data(filepath=DATA_FILE, target_column=None, time_column=No
         'n_samples': X.shape[0],
         'n_features': X.shape[1]
     }
+    
+    # Add outcome-specific data
+    if outcome_type.lower() in ['survival', 'survival_analysis']:
+        results['T'] = outcome_data['T']  # Time to event
+        results['E'] = outcome_data['E']  # Event indicator
     
     logger.info("Data preparation completed successfully!")
     logger.info(f"Final dataset: {results['n_samples']} samples, {results['n_features']} features")
