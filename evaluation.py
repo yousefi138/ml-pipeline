@@ -15,11 +15,12 @@ import seaborn as sns
 import joblib
 from datetime import datetime
 import json
+import warnings
 
 from config import (
     REPORTS_DIR, MODELS_DIR, RANDOM_SEED, TARGET_COLUMN
 )
-from utils import setup_logging
+from utils import setup_logging, ShapleyCalculator
 
 logger = setup_logging('evaluation')
 
@@ -1067,7 +1068,7 @@ class ConsolidatedReportGenerator:
     Combines results from multiple strategy-model combinations into unified reports.
     """
     
-    def __init__(self, all_results_dict):
+    def __init__(self, all_results_dict, X=None, y=None):
         """
         Initialize with results from all imputation strategies.
         
@@ -1088,10 +1089,20 @@ class ConsolidatedReportGenerator:
                 },
                 ...
             }
+        X : np.ndarray or pd.DataFrame, optional
+            Feature matrix for SHAP calculations
+        y : pd.Series or np.ndarray, optional
+            Target variable
         """
         self.all_results = all_results_dict
         self.strategies = list(all_results_dict.keys())
+        self.X = X
+        self.y = y
+        self.shap_values = {}  # Store SHAP values for each model
+        self.shap_plots = {}   # Store base64-encoded SHAP plots
         logger.info(f"Initialized ConsolidatedReportGenerator for {len(self.strategies)} strategies")
+        if X is not None and y is not None:
+            logger.info(f"  - Training data provided for SHAP calculations: {X.shape[0]} samples, {X.shape[1]} features")
     
     def get_strategy_model_parameters(self, strategy):
         """
@@ -1224,6 +1235,136 @@ class ConsolidatedReportGenerator:
         comparison_df = pd.DataFrame(comparison_data)
         return comparison_df
     
+    def _calculate_shap_for_model(self, strategy, model_name):
+        """
+        Calculate SHAP values for a single model.
+        
+        Parameters
+        ----------
+        strategy : str
+            Imputation strategy
+        model_name : str
+            'elastic_net' or 'random_forest'
+        
+        Returns
+        -------
+        success : bool
+            Whether SHAP calculation succeeded
+        """
+        import os
+        
+        try:
+            if self.X is None or self.y is None:
+                logger.warning("X and y not provided, skipping SHAP calculations")
+                return False
+            
+            strategy_data = self.all_results.get(strategy, {})
+            model_results = strategy_data.get(model_name, {})
+            model = model_results.get('final_model')
+            
+            if model is None:
+                logger.warning(f"No final model found for {model_name} ({strategy})")
+                return False
+            
+            # Get the full model (which includes preprocessing if it's a pipeline)
+            # The ShapleyCalculator will handle extracting the classifier and applying preprocessing
+            model_for_shap = model
+            
+            # Get feature names - for SHAP, use ORIGINAL feature names (before transformation)
+            # because we're passing X in its original form (raw, unpreprocessed)
+            feature_names = strategy_data.get('feature_names', None)
+            if feature_names is None:
+                # If no feature names available, use column names from X
+                if hasattr(self.X, 'columns'):
+                    feature_names = self.X.columns.tolist()
+                else:
+                    feature_names = [f"Feature_{i}" for i in range(self.X.shape[1])]
+            
+            logger.info(f"Calculating SHAP values for {model_name} ({strategy} imputation)...")
+            
+            # Initialize SHAP calculator
+            shap_calc = ShapleyCalculator(logger=logger)
+            
+            # Create output directory for SHAP plots
+            shap_plots_dir = os.path.join(os.path.dirname(REPORTS_DIR), 'reports', 'shap_plots')
+            os.makedirs(shap_plots_dir, exist_ok=True)
+            
+            # Generate file paths for plots
+            bar_plot_path = os.path.join(shap_plots_dir, f'shap_bar_{strategy}_{model_name}.png')
+            beeswarm_plot_path = os.path.join(shap_plots_dir, f'shap_beeswarm_{strategy}_{model_name}.png')
+            
+            # Calculate SHAP values (using sample for efficiency)
+            try:
+                shap_values, explainer, X_sample, transformed_feature_names = shap_calc.calculate_shapley_values(
+                    model_for_shap, self.X, 
+                    feature_names=feature_names,
+                    max_samples=100  # Reduced sample size for faster computation
+                )
+                
+                # Generate visualization plots as base64 images and save as PNG files
+                # Use transformed_feature_names for the plots since X_sample is transformed data
+                bar_plot = shap_calc.generate_summary_plot_base64(
+                    shap_values, X_sample, 
+                    feature_names=transformed_feature_names,
+                    plot_type='bar',
+                    max_display=15,
+                    save_path=bar_plot_path
+                )
+                
+                beeswarm_plot = shap_calc.generate_summary_plot_base64(
+                    shap_values, X_sample, 
+                    feature_names=transformed_feature_names,
+                    plot_type='beeswarm',
+                    max_display=15,
+                    save_path=beeswarm_plot_path
+                )
+                
+                # Store results
+                key = f"{strategy}_{model_name}"
+                self.shap_values[key] = {
+                    'shap_values': shap_values,
+                    'explainer': explainer,
+                    'X_sample': X_sample,
+                    'feature_names': feature_names
+                }
+                
+                self.shap_plots[key] = {
+                    'bar_plot': bar_plot,
+                    'beeswarm_plot': beeswarm_plot
+                }
+                
+                logger.info(f"✓ SHAP values calculated successfully for {model_name} ({strategy})")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"TreeExplainer not available, attempting fallback SHAP calculation: {e}")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Could not calculate SHAP for {model_name} ({strategy}): {str(e)}")
+            return False
+    
+    def calculate_all_shap_values(self):
+        """
+        Calculate SHAP values for all models if training data is available.
+        """
+        if self.X is None or self.y is None:
+            logger.info("Training data not provided, skipping SHAP calculations")
+            return
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("CALCULATING SHAPLEY VALUE FEATURE IMPORTANCE")
+        logger.info("=" * 80)
+        
+        # Suppress SHAP warnings
+        warnings.filterwarnings('ignore', category=UserWarning)
+        
+        for strategy in self.strategies:
+            for model_name in ['elastic_net', 'random_forest']:
+                self._calculate_shap_for_model(strategy, model_name)
+        
+        logger.info("=" * 80)
+    
     def save_consolidated_csv(self, filename='consolidated_results.csv'):
         """
         Save consolidated comparison to CSV.
@@ -1309,7 +1450,7 @@ class ConsolidatedReportGenerator:
         logger.info(f"Consolidated JSON saved to {filepath}")
         return filepath
     
-    def _build_consolidated_model_params_html(self, params, model_name):
+    def _build_consolidated_model_params_html(self, params, model_name, strategy=None, model_results_key=None):
         """
         Build HTML section for model parameters in consolidated report.
         Similar to ModelEvaluator._build_model_params_html but for consolidated view.
@@ -1320,6 +1461,10 @@ class ConsolidatedReportGenerator:
             Model parameters dictionary
         model_name : str
             Name of the model ('Elastic Net' or 'Random Forest')
+        strategy : str, optional
+            Imputation strategy for SHAP plot lookup
+        model_results_key : str, optional
+            Model results key for SHAP plot lookup
         
         Returns
         -------
@@ -1425,6 +1570,43 @@ class ConsolidatedReportGenerator:
                     </div>"""
             specific_html += "</div>"
         
+        # Build SHAP visualization section if available
+        shap_html = ""
+        if strategy and model_results_key and model_results_key in self.shap_plots:
+            shap_plot_data = self.shap_plots.get(model_results_key, {})
+            bar_plot_b64 = shap_plot_data.get('bar_plot')
+            beeswarm_plot_b64 = shap_plot_data.get('beeswarm_plot')
+            
+            if bar_plot_b64 or beeswarm_plot_b64:
+                shap_html = """
+            <h4>Shapley Value Feature Importance (Model-Agnostic)</h4>
+            <p style="font-size: 0.9em; color: #666; margin-bottom: 15px;">
+                <strong>SHAP (Shapley Additive exPlanations)</strong> provides model-agnostic feature importance based on game theory,
+                showing the mean absolute impact of each feature on model predictions, independent of model type.
+            </p>"""
+                
+                if bar_plot_b64:
+                    shap_html += f"""
+            <div style="margin-bottom: 20px;">
+                <h5 style="color: #555; margin-bottom: 10px;">Mean |SHAP| Values</h5>
+                <div style="text-align: center;">
+                    <img src="data:image/png;base64,{bar_plot_b64}" alt="SHAP Bar Plot" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px;">
+                </div>
+            </div>"""
+                
+                if beeswarm_plot_b64:
+                    shap_html += f"""
+            <div style="margin-bottom: 20px;">
+                <h5 style="color: #555; margin-bottom: 10px;">SHAP Value Distribution (Beeswarm)</h5>
+                <div style="text-align: center;">
+                    <img src="data:image/png;base64,{beeswarm_plot_b64}" alt="SHAP Beeswarm Plot" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px;">
+                </div>
+                <p style="font-size: 0.85em; color: #888; margin-top: 8px;">
+                    Each dot represents a single sample. Red indicates high feature values, blue indicates low values.
+                    Horizontal position shows the impact on model output.
+                </p>
+            </div>"""
+        
         html = f"""<div class="model-card">
             <h3>{model_name} - {model_type}</h3>
             <div class="metric-grid">
@@ -1440,6 +1622,7 @@ class ConsolidatedReportGenerator:
             <h4>Hyperparameters</h4>
             {hyperparam_html}
             {specific_html}
+            {shap_html}
         </div>"""
         
         return html
@@ -1553,10 +1736,12 @@ class ConsolidatedReportGenerator:
             
             if strategy_params:
                 en_params_html = self._build_consolidated_model_params_html(
-                    strategy_params.get('elastic_net', {}), 'Elastic Net'
+                    strategy_params.get('elastic_net', {}), 'Elastic Net',
+                    strategy=strategy, model_results_key=f"{strategy}_elastic_net"
                 )
                 rf_params_html = self._build_consolidated_model_params_html(
-                    strategy_params.get('random_forest', {}), 'Random Forest'
+                    strategy_params.get('random_forest', {}), 'Random Forest',
+                    strategy=strategy, model_results_key=f"{strategy}_random_forest"
                 )
             
             strategy_params_html += f"""
@@ -1984,6 +2169,9 @@ class ConsolidatedReportGenerator:
         logger.info("\n" + "=" * 80)
         logger.info("GENERATING CONSOLIDATED REPORTS")
         logger.info("=" * 80)
+        
+        # Calculate SHAP values first (if training data available)
+        self.calculate_all_shap_values()
         
         csv_path = self.save_consolidated_csv()
         json_path = self.save_consolidated_json()

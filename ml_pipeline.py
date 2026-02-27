@@ -221,7 +221,8 @@ CACHING BEHAVIOR:
         logger.info("Generating consolidated evaluation report across all strategies...")
         
         # Generate unified consolidated reports for all strategy-model combinations
-        consolidated_reporter = ConsolidatedReportGenerator(all_results)
+        # Pass X and y for SHAP value calculations
+        consolidated_reporter = ConsolidatedReportGenerator(all_results, X=X, y=y)
         report_paths = consolidated_reporter.generate_all_reports()
         
         logger.info(f"✓ Consolidated reports generated successfully")

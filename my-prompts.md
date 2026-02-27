@@ -77,6 +77,9 @@ For example, I suspect that the 'median' used by the median imputation is curren
 
 Similarly for scaling, I would like values used to do this in the test data (mean and sd) to be the values of those as estimated in the training set.
 
- 
+## 
+Goal: to include shapley value feature importance plots for the final pipeline models in the consolidated results report.
+
+Currently, the consolidated report includes nice summaries/rankings of feature importance of all the resulting modals. However, the pipeline currently uses the model's internal feature importance metrics for this - e.g. coefficients for elastic net and rf variable importance. However, I would like a modal agnostic summary of the feature importance of each model included in the pipeline result report by default
 
 

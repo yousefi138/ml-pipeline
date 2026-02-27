@@ -277,3 +277,259 @@ def format_cv_results(cv_scores, model_name):
     }
     
     return report
+
+
+class ShapleyCalculator:
+    """
+    Calculate and visualize SHAP (Shapley Additive exPlanations) values.
+    Provides model-agnostic feature importance through SHAP value analysis.
+    """
+    
+    def __init__(self, logger=None):
+        """
+        Initialize ShapleyCalculator.
+        
+        Parameters
+        ----------
+        logger : logging.Logger, optional
+            Logger instance for reporting
+        """
+        self.logger = logger or logging.getLogger('shapley')
+        try:
+            import shap
+            self.shap = shap
+        except ImportError:
+            self.logger.error("SHAP package not installed. Install with: pip install shap")
+            raise
+    
+    def calculate_shapley_values(self, model, X, feature_names=None, max_samples=None):
+        """
+        Calculate SHAP values for a model and dataset.
+        CRITICAL: Applies preprocessing to X so dimensions match SHAP values.
+        """
+        self.logger.info("Calculating SHAP values...")
+        
+        # Convert to DataFrame
+        if isinstance(X, np.ndarray):
+            X_df = pd.DataFrame(X)
+            if feature_names:
+                X_df.columns = feature_names
+            else:
+                feature_names = [f"Feature_{i}" for i in range(X.shape[1])]
+                X_df.columns = feature_names
+        else:
+            X_df = X.copy()
+            if feature_names is None:
+                feature_names = X_df.columns.tolist()
+        
+        # CRITICAL: Apply preprocessing FIRST to get transformed data
+        # This ensures dimensions match what SHAP values will be computed on
+        X_transformed = X_df
+        transformed_feature_names = list(feature_names)
+        
+        if hasattr(model, 'named_steps') and 'preprocess' in model.named_steps:
+            self.logger.debug("Applying preprocessing pipeline...")
+            try:
+                preprocess_pipe = model.named_steps['preprocess']
+                X_transformed = preprocess_pipe.transform(X_df)
+                
+                # Get transformed feature names
+                if hasattr(preprocess_pipe, 'get_feature_names_out'):
+                    try:
+                        transformed_feature_names = preprocess_pipe.get_feature_names_out().tolist()
+                    except:
+                        transformed_feature_names = [f"Feature_{i}" for i in range(X_transformed.shape[1])]
+                else:
+                    transformed_feature_names = [f"Feature_{i}" for i in range(X_transformed.shape[1])]
+                    
+                self.logger.debug(f"Transformed X from {X_df.shape} to {X_transformed.shape}")
+            except Exception as e:
+                self.logger.warning(f"Could not apply preprocessing: {str(e)}")
+                X_transformed = X_df
+        
+        # Convert to numpy if needed
+        if isinstance(X_transformed, pd.DataFrame):
+            X_array = X_transformed.values
+        else:
+            X_array = X_transformed
+        
+        # Sample for efficiency
+        if len(X_array) > (max_samples or 500):
+            sample_size = max_samples or 500
+            sample_indices = np.random.choice(len(X_array), size=sample_size, replace=False)
+            X_sample = X_array[sample_indices]
+            self.logger.info(
+                f"Using {sample_size} samples for SHAP calculation "
+                f"(total available: {len(X_array)})"
+            )
+        else:
+            X_sample = X_array
+        
+        try:
+            # Create background data
+            background_size = min(50, max(5, len(X_sample) // 10))
+            background_indices = np.random.choice(len(X_sample), size=min(background_size, len(X_sample)), replace=False)
+            background_array = X_sample[background_indices]
+            
+            # Create explainer - KernelExplainer works with already-transformed (preprocessed) data
+            explainer = self.shap.KernelExplainer(
+                model.named_steps['clf'].predict_proba if (hasattr(model, 'named_steps') and 'clf' in model.named_steps)
+                else model.predict_proba,
+                background_array
+            )
+            
+            # Calculate SHAP values
+            self.logger.debug(f"Computing SHAP values for {len(X_sample)} samples...")
+            shap_values = explainer.shap_values(X_sample)
+            
+            # Handle binary classification
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1]
+            
+            # Ensure numpy array
+            if isinstance(shap_values, pd.DataFrame):
+                shap_values = shap_values.values
+            
+            self.logger.info(f"✓ SHAP values calculated successfully")
+            return shap_values, explainer, X_sample, transformed_feature_names
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating SHAP values: {str(e)}")
+            raise
+    
+    def generate_summary_plot_base64(self, shap_values, X, feature_names=None,
+                                     plot_type='bar', max_display=10, save_path=None):
+        """
+        Generate SHAP summary plot and return as base64-encoded image.
+        
+        Parameters
+        ----------
+        shap_values : np.ndarray
+            SHAP values
+        X : np.ndarray or pd.DataFrame
+            Feature data
+        feature_names : list, optional
+            Feature names
+        plot_type : str
+            Type of plot: 'bar', 'beeswarm', or 'decisions'
+        max_display : int
+            Maximum number of features to display
+        save_path : str, optional
+            If provided, save plot to this file path as PNG
+        
+        Returns
+        -------
+        base64_string : str
+            Base64-encoded PNG image
+        """
+        import matplotlib.pyplot as plt
+        import io
+        import base64
+        
+        self.logger.info(f"Generating SHAP {plot_type} plot...")
+        
+        # Convert to DataFrame for SHAP plotting
+        if isinstance(X, np.ndarray):
+            if feature_names is None:
+                feature_names = [f"Feature {i}" for i in range(X.shape[1])]
+            X_df = pd.DataFrame(X, columns=feature_names)
+        else:
+            X_df = X
+            if feature_names is None:
+                feature_names = X_df.columns.tolist()
+        
+        try:
+            # Create figure
+            fig = plt.figure(figsize=(10, 6))
+            
+            # Convert to numpy array
+            if isinstance(X, np.ndarray):
+                X_array = X
+            else:
+                X_array = X.values
+            
+            # Ensure feature_names match X dimensions
+            if feature_names is None or len(feature_names) != X_array.shape[1]:
+                feature_names = [f"Feature {i}" for i in range(X_array.shape[1])]
+            
+            self.logger.debug(f"Generating {plot_type} plot with X shape {X_array.shape}, {len(feature_names)} feature names")
+            
+            if plot_type == 'bar':
+                # Bar plot: mean |SHAP| values per feature
+                self.shap.summary_plot(
+                    shap_values, X_array, feature_names=feature_names,
+                    plot_type='bar',
+                    max_display=max_display, show=False
+                )
+            elif plot_type == 'beeswarm':
+                # Beeswarm/violin plot showing distribution of SHAP values
+                self.shap.summary_plot(
+                    shap_values, X_array, feature_names=feature_names,
+                    plot_type='violin',
+                    max_display=max_display, show=False
+                )
+            elif plot_type == 'decisions':
+                # Decision plot
+                self.shap.decision_plot(
+                    shap_values.mean(),  # base_value
+                    shap_values, X_array, feature_names=feature_names,
+                    max_display=max_display, show=False
+                )
+            
+            # Convert to base64
+            buffer = io.BytesIO()
+            plt.tight_layout()
+            plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+            buffer.seek(0)
+            base64_string = base64.b64encode(buffer.read()).decode()
+            
+            # Save to disk if path provided
+            if save_path:
+                try:
+                    import os
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    with open(save_path, 'wb') as f:
+                        buffer.seek(0)
+                        f.write(buffer.read())
+                    self.logger.info(f"✓ SHAP {plot_type} plot saved to {save_path}")
+                except Exception as e:
+                    self.logger.warning(f"Could not save plot to disk: {str(e)}")
+            
+            plt.close(fig)
+            
+            self.logger.info(f"✓ SHAP {plot_type} plot generated")
+            return base64_string
+        
+        except Exception as e:
+            self.logger.error(f"Error generating SHAP plot: {str(e)}")
+            plt.close('all')
+            return None
+    
+    def get_feature_importance_from_shap(self, shap_values, feature_names=None):
+        """
+        Extract mean absolute SHAP values as model-agnostic feature importance.
+        
+        Parameters
+        ----------
+        shap_values : np.ndarray
+            SHAP values
+        feature_names : list, optional
+            Feature names
+        
+        Returns
+        -------
+        importance_df : pd.DataFrame
+            DataFrame with features and their mean absolute SHAP values
+        """
+        # Calculate mean absolute SHAP values
+        mean_abs_shap = np.abs(shap_values).mean(axis=0)
+        
+        if feature_names is None:
+            feature_names = [f"Feature {i}" for i in range(len(mean_abs_shap))]
+        
+        importance_df = pd.DataFrame({
+            'feature': feature_names,
+            'shap_importance': mean_abs_shap
+        }).sort_values('shap_importance', ascending=False)
+        
+        return importance_df
